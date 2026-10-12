@@ -1,0 +1,142 @@
+# =============================================================================
+#  CodeContainer  --  EXAMPLE config (safe to commit)
+#
+#  Copy this to compose.yaml and fill in the "EDIT ME" values:
+#
+#      cp compose.example.yaml compose.yaml      # or:  make init
+#
+#  compose.yaml is gitignored on purpose: it holds your GH token in plaintext
+#  and your real host paths. Never commit it.
+#
+#  SSH EGRESS: Docker/Compose cannot express egress filtering, so the rule that
+#  stops the agents reaching tcp/22 on your LAN or on the UnRaid host lives on
+#  the host, in ./scripts/no-ssh-egress.sh:
+#
+#      make egress-apply     # block container -> LAN + host on tcp/22,2222
+#      make egress-status
+#      make egress-remove
+#
+#  Run it once after the stack is up, and again after any compose down/up.
+#
+#  SCRATCH: /tmp is bound to a host directory (see "volumes"), so scratch never
+#  touches UnRaid's Docker storage. It is wiped on container start, and
+#  ./scripts/scratch-sweep.sh clears it whenever the container is stopped.
+# =============================================================================
+name: codecontainer
+
+services:
+  code:
+    build:
+      context: .
+      args:
+        NODE_MAJOR: "24"
+        GO_VERSION: "latest"
+        DOTNET_CHANNEL: "10.0"
+    image: ghcr.io/shadyhippo/codecontainer:latest
+    container_name: codecontainer
+    hostname: codecontainer
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+    environment:
+      # ---------------------------------------------------------------------
+      # EDIT ME
+      # ---------------------------------------------------------------------
+      TZ: "UTC"
+      PUBLIC_HOST: "100.x.y.z" # your Tailscale IP (host part of preview URLs)
+      GH_TOKEN: "" # GitHub PAT: used by gh + git's credential helper
+      GITHUB_TOKEN: "" # same value; some tools look for this name
+
+      # ---------------------------------------------------------------------
+      PORT_BASE: "30000"
+      PORT_END: "30099"
+      T3CODE_HOME: "/root/.t3code"
+
+      # --- scratch ---------------------------------------------------------
+      # Path *inside* the container that is wiped. Leave as /tmp.
+      SCRATCH_DIR: "/tmp"
+      # Wipe scratch on every container start, so leftovers from a crashed or
+      # killed build are always cleared.
+      SCRATCH_WIPE_ON_START: "1"
+
+    # --- tuning for ~5-10 agents running concurrently ("yolo" mode) ---------
+    # Shared memory for parallel headless browsers.
+    shm_size: "4gb"
+    # Docker's default nofile is 1024 -- far too low for many agents running
+    # bundlers, watchers and headless browsers at once.
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+
+    # Bind to the host's Tailscale IP in production; 127.0.0.1 = host-only.
+    ports:
+      - "127.0.0.1:30000-30099:30000-30099" # app previews
+      - "127.0.0.1:3773:3773" # T3 Code UI
+      - "127.0.0.1:4096:4096" # OpenCode API
+
+    volumes:
+      # EDIT ME -- the ONLY host path the container may read/write.
+      - "/mnt/user/Projects:/workspace"
+
+      # -----------------------------------------------------------------------
+      # EDIT ME -- big disk-backed scratch, kept OFF Docker storage.
+      #
+      #   *** EVERYTHING IN THIS DIRECTORY IS WIPED ***
+      #
+      # Use a pool with lots of free space. Prefer cache/NVMe over the array:
+      # array writes are slow and touch parity on every write.
+      # Leave 20-40GB+ of headroom for kernel trees and large builds.
+      #
+      # If you remove this line, /tmp falls back to the container's writable
+      # layer -- i.e. inside UnRaid's Docker storage, which you do not want.
+      - "/mnt/cache/scratch/codecontainer:/tmp"
+
+      # Drop credential files here; mounted read-only.
+      - "./secrets:/secrets:ro"
+
+      # --- credentials / agent state (survive rebuilds) --------------------
+      - t3-config:/root/.config
+      - t3-data:/root/.t3code
+      - agent-local:/root/.local
+      - codex-auth:/root/.codex
+      - claude-auth:/root/.claude
+
+      # --- caches (kept out of the image) ----------------------------------
+      - npm-cache:/root/.npm
+      - go-cache:/root/go
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - pip-cache:/root/.cache
+      - bun-cache:/root/.bun
+
+    healthcheck:
+      test:
+        ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/3773' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+
+    security_opt:
+      - no-new-privileges:true
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+volumes:
+  t3-config:
+  t3-data:
+  agent-local:
+  codex-auth:
+  claude-auth:
+  npm-cache:
+  go-cache:
+  cargo-registry:
+  cargo-git:
+  pip-cache:
+  bun-cache:

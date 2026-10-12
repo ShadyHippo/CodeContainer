@@ -1,0 +1,15 @@
+# Optional override: run with host networking instead of publishing a range.
+#
+#   docker compose -f compose.yaml -f compose.host.yaml up -d
+#
+# Then every port a dev server binds is directly reachable on the host /
+# tailnet, with no mapping and no docker-proxy cost (like Wolf does).
+#
+# Note: with host networking, `ports:` is ignored, so BIND_IP no longer
+# protects anything -- dev servers bind however they like.
+services:
+  code:
+    network_mode: host
+    ports: !reset []
+    environment:
+      PUBLIC_HOST: "127.0.0.1"

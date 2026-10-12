@@ -1,0 +1,29 @@
+[init]
+	defaultBranch = main
+[safe]
+	directory = *
+[user]
+	# Default so that `git commit` never fails. Override with:
+	#   git config --global user.name "..."   (persists in the config volume)
+	name = CodeContainer Agent
+	email = agent@codecontainer.local
+[core]
+	editor = nvim
+	autocrlf = input
+[merge]
+	conflictStyle = zdiff3
+[diff]
+	colorMoved = default
+[credential "https://github.com"]
+	helper = !gh auth git-credential
+[credential "https://gist.github.com"]
+	helper = !gh auth git-credential
+[alias]
+	d = diff
+	ds = diff --staged
+	lg = log --oneline --graph --decorate -20
+	st = status -sb
+[fetch]
+	prune = true
+[pull]
+	ff = true

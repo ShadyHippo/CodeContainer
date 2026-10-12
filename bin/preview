@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# preview - show listening TCP services in this container and how to reach them
+# from the host / tailnet.
+set -uo pipefail
+
+BASE="${PORT_BASE:-30000}"
+END="${PORT_END:-30099}"
+HOST_HINT=""
+if [ -n "${PUBLIC_HOST:-}" ]; then
+  HOST="${PUBLIC_HOST}"
+else
+  HOST="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  HOST="${HOST:-<host-ip>}"
+  HOST_HINT="  !! guessed container IP - set PUBLIC_HOST to your Tailnet IP for links that work from outside"
+fi
+
+in_range() { [ "$1" -ge "$BASE" ] 2>/dev/null && [ "$1" -le "$END" ] 2>/dev/null; }
+
+fmt() {
+  local port="$1" proc="$2"
+  printf '  http://%s:%-6s %s\n' "$HOST" "$port" "$proc"
+}
+
+echo "CodeContainer :: listening services"
+echo "  published preview range: ${BASE}-${END}  ->  host ${HOST}"
+[ -n "$HOST_HINT" ] && echo "$HOST_HINT"
+echo
+
+declare -a listed=() unlisted=()
+
+if command -v ss >/dev/null 2>&1; then
+  while read -r _state _rq _sq local _peer proc; do
+    port="${local##*:}"
+    [ -z "$port" ] && continue
+    proc="${proc#users:((\"}"; proc="${proc%%\"*}"
+    listed+=("$port|$proc")
+  done < <(ss -H -ltnp 2>/dev/null || ss -H -ltn 2>/dev/null)
+fi
+
+if [ "${#listed[@]}" -eq 0 ]; then
+  echo "  (nothing listening yet)"
+  exit 0
+fi
+
+for entry in "${listed[@]}"; do
+  port="${entry%%|*}"; proc="${entry##*|}"
+  if in_range "$port"; then
+    printf 'REACHABLE  '; fmt "$port" "$proc"
+  else
+    unlisted+=("$port|$proc")
+  fi
+done
+
+if [ "${#unlisted[@]}" -gt 0 ]; then
+  echo
+  echo "  NOT published (only reachable inside the container):"
+  for entry in "${unlisted[@]}"; do
+    port="${entry%%|*}"; proc="${entry##*|}"
+    printf '  %-6s %s\n' "$port" "$proc"
+  done
+  echo
+  echo "  Tip: bind dev servers to ${BASE}-${END} (see 'agent-notes')."
+fi

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# freeport - print a free TCP port inside the published preview range.
+set -euo pipefail
+
+BASE="${PORT_BASE:-30000}"
+END="${PORT_END:-30099}"
+
+if ! command -v ss >/dev/null 2>&1; then
+  echo "freeport: 'ss' not available" >&2
+  exit 1
+fi
+
+for p in $(seq "$BASE" "$END"); do
+  if [ -z "$(ss -Hltn "sport = :$p" 2>/dev/null)" ]; then
+    echo "$p"
+    exit 0
+  fi
+done
+
+echo "freeport: no free port in ${BASE}-${END}" >&2
+exit 1

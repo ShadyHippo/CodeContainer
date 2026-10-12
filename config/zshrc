@@ -1,0 +1,6 @@
+# CodeContainer shell setup
+export PATH="$HOME/.local/bin:$HOME/go/bin:/usr/local/go/bin:/usr/local/cargo/bin:$PATH"
+alias ll='ls -lah --group-directories-first'
+alias ports='preview'
+alias notes='agent-notes'
+if command -v starship >/dev/null 2>&1; then eval "$(starship init zsh)"; fi

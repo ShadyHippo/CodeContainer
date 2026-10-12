@@ -1,0 +1,28 @@
+# Keep the build context small and make sure nothing sensitive is shipped
+# into the image.
+
+# VCS / CI / docs
+.git
+.gitignore
+.github/
+README.md
+LICENSE
+Makefile
+
+# Host-side config that is never needed inside the image
+compose.example.yaml
+compose.host.yaml
+compose.yaml
+.env
+.env.*
+
+# Host-side dirs
+workspace/
+secrets/
+scripts/
+
+# Never ship dependency trees from the context
+node_modules/
+**/node_modules/
+
+*.log

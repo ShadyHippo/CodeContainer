@@ -1,0 +1,8 @@
+# CodeContainer shell setup
+export PATH="$HOME/.local/bin:$HOME/go/bin:/usr/local/go/bin:/usr/local/cargo/bin:$PATH"
+export MANPAGER='less -R'
+alias ll='ls -lah --group-directories-first'
+alias ports='preview'
+alias notes='agent-notes'
+PS1='\[\e[1;32m\]\u@codecontainer\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]\$ '
+if command -v starship >/dev/null 2>&1; then eval "$(starship init bash)"; fi

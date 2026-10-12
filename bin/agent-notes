@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# agent-notes - print the environment rules that agents in this box follow.
+# Single source of truth: /etc/codecontainer/AGENTS.md (seeded into the agents'
+# config dirs on startup).
+set -euo pipefail
+
+for src in /etc/codecontainer/AGENTS.md /root/.config/opencode/AGENTS.md; do
+  if [ -f "$src" ]; then exec cat "$src"; fi
+done
+
+echo "agent-notes: no AGENTS.md found" >&2
+exit 1

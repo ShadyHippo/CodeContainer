@@ -1,0 +1,41 @@
+# ---------------------------------------------------------------------------
+# Secrets and local config. THIS REPOSITORY IS PUBLIC -- never commit these.
+# ---------------------------------------------------------------------------
+# Your real config: holds GH_TOKEN in plaintext and your real host paths.
+# The committed template is compose.example.yaml.
+compose.yaml
+
+# Environment files (the project deliberately does not use .env, but be safe).
+.env
+.env.*
+
+# Credential files dropped on the host for the /secrets mount.
+secrets/
+
+# ---------------------------------------------------------------------------
+# Local / runtime state
+# ---------------------------------------------------------------------------
+workspace/
+*.log
+.cache/
+/run/
+
+# ---------------------------------------------------------------------------
+# Build output
+# ---------------------------------------------------------------------------
+*.tar
+*.tar.gz
+*.tmp
+dist/
+
+# ---------------------------------------------------------------------------
+# Editors and OS
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.code-workspace
