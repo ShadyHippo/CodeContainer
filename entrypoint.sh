@@ -7,6 +7,9 @@ T3CODE_HOME="${T3CODE_HOME:-/root/.t3code}"
 OPENCODE_HOST="${OPENCODE_HOST:-0.0.0.0}"
 OPENCODE_PORT="${OPENCODE_PORT:-4096}"
 ENABLE_OPENCODE_SERVER="${ENABLE_OPENCODE_SERVER:-1}"
+AUTO_PAIR="${AUTO_PAIR:-1}"
+PAIR_TTL="${PAIR_TTL:-3650d}"       # T3 has no "never"; 10 years is the practical
+PAIR_LABEL="${PAIR_LABEL:-boot}"    # equivalent, and it is overridable.
 
 export T3CODE_HOME
 mkdir -p /workspace "$T3CODE_HOME" "${GOPATH:-/root/go}" "${CARGO_HOME:-/usr/local/cargo}"
@@ -75,6 +78,56 @@ seed_rules() {
 }
 seed_rules
 
+# --- pairing link -------------------------------------------------------------
+# T3's own startup URL contains the CONTAINER's address, which nothing outside
+# the host can reach, and its token dies 5 minutes after boot. Mint one bound to
+# PUBLIC_HOST instead, so the container log always holds a link that works.
+print_pairing() {
+  [ "$AUTO_PAIR" = "1" ] || return 0
+
+  if [ -z "${PUBLIC_HOST:-}" ]; then
+    echo "[entrypoint] PUBLIC_HOST not set - skipping pairing link"
+    return 0
+  fi
+
+  # wait for the server to answer before asking it to mint anything
+  local i
+  for i in $(seq 1 90); do
+    (exec 3<>"/dev/tcp/127.0.0.1/${T3_PORT}") 2>/dev/null && break
+    sleep 1
+  done
+
+  # Drop UNUSED links minted by earlier boots so only one is ever valid.
+  # Consumed tokens are not "active", so paired devices are never touched.
+  local id
+  for id in $(t3 auth pairing list 2>/dev/null | grep -F "(${PAIR_LABEL})" | awk '{print $1}'); do
+    t3 auth pairing revoke "$id" >/dev/null 2>&1 && echo "[entrypoint] revoked stale pairing link ${id}"
+  done
+
+  local out url
+  if ! out="$(t3 auth pairing create \
+      --base-url "http://${PUBLIC_HOST}:${T3_PORT}" \
+      --ttl "${PAIR_TTL}" --label "${PAIR_LABEL}" 2>&1)"; then
+    echo "[entrypoint] could not mint a pairing link: ${out}"
+    return 0
+  fi
+  url="$(printf '%s\n' "${out}" | grep -oE 'https?://[^[:space:]]+/pair#token=[A-Za-z0-9]+' | head -n1)"
+
+  printf '\n'
+  printf '  =============== PAIRING LINK  (USE THIS ONE) ===============\n'
+  printf '  Ignore the "Pairing URL" that T3 printed above: it contains the\n'
+  printf '  container internal address, which nothing can reach, and its\n'
+  printf '  token dies after 5 minutes. This one works and does not expire.\n'
+  printf '\n'
+  printf '    %s\n\n' "${url:-${out}}"
+  if [ -n "${url}" ] && command -v qrencode >/dev/null 2>&1; then
+    qrencode -t ANSIUTF8 "${url}"
+    printf '\n'
+  fi
+  printf '  expires: %s   label: %s   (revoke: t3 auth pairing list|revoke <id>)\n' "${PAIR_TTL}" "${PAIR_LABEL}"
+  printf '  ============================================================\n\n'
+}
+
 banner() {
   printf '\n'
   printf '  CodeContainer  |  T3 Code + OpenCode  |  Ubuntu 26.04\n'
@@ -116,7 +169,11 @@ banner
 if command -v t3 >/dev/null 2>&1; then
   set -- t3 serve --host "${T3_HOST}" --port "${T3_PORT}" --no-browser --base-dir "${T3CODE_HOME}"
 else
-  set -- npx -y t3@latest serve --host "${T3_HOST}" --port "${T3_PORT}" --no-browser --base-dir "${T3CODE_HOME}"
+  set -- npx -y t3@nightly serve --host "${T3_HOST}" --port "${T3_PORT}" --no-browser --base-dir "${T3CODE_HOME}"
 fi
 echo "[entrypoint] exec: $*"
+
+# Prints the pairing link (and a QR) into the container log once the server is up.
+print_pairing &
+
 exec "$@"

@@ -201,18 +201,33 @@ projects.
 
 ## Pairing a device
 
+**The container prints a ready-to-use link on every start.** It's in the logs:
+
 ```bash
-make pair                      # 1 hour token, label "device"
-make pair TTL=30d LABEL=phone  # 30 days, labelled
+docker compose logs code | sed -n '/PAIRING LINK/,/====$/p'
 ```
 
-This prints a `/pair#token=...` link and a QR code. Open the link on your
-laptop, or scan the QR with your phone.
+You'll get a `http://<PUBLIC_HOST>:3773/pair#token=...` link **and a QR code**.
+Open the link on your laptop, or scan the QR with your phone. No commands.
+
+The token is minted fresh on every boot and is not time-limited — T3 has no
+"never" TTL, so it is issued for 10 years. Unused links minted by earlier boots
+are revoked automatically, so exactly one valid link exists at a time. Paired
+devices are unaffected.
+
+Knobs (all optional): `AUTO_PAIR=0` to disable, `PAIR_TTL=30d` to change the
+lifetime, `PAIR_LABEL=name` to change the label.
+
+Mint one on demand instead:
+
+```bash
+docker compose exec -T code pair 30d phone      # TTL, label
+```
 
 **Do not use the pairing URL that T3 Code prints at startup.** It contains the
 container's *internal* address (`http://172.17.0.2:3773`), which nothing on your
-network can reach, and its token expires after 5 minutes. `make pair` binds the
-token to `PUBLIC_HOST` instead, so the link and the QR both work.
+network can reach, and its token expires after 5 minutes. The automatic link
+above is bound to `PUBLIC_HOST` instead, so both the link and its QR work.
 
 The link is a credential: whoever holds it can operate the agents. Treat it
 like a password, and use a short TTL for anything you don't control.
