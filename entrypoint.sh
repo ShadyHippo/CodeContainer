@@ -86,6 +86,7 @@ banner() {
   printf '  workspace      ->  /workspace   (only host path mounted)\n'
   printf '  scratch        ->  %s\n' "${SCRATCH}"
   printf '  shell          ->  docker exec -it <container> bash\n'
+  printf '  pair a device  ->  docker compose exec code pair\n'
   printf '  first run      ->  opencode auth login\n'
   printf '  agent rules    ->  /root/.config/opencode/AGENTS.md\n'
   printf '  T3 pairing token below is a password. Do not expose this port.\n\n'

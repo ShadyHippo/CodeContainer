@@ -1,7 +1,7 @@
 COMPOSE ?= docker compose
 IMAGE   ?= ghcr.io/shadyhippo/codecontainer:latest
 
-.PHONY: help init preflight secrets build up down restart logs shell preview notes \
+.PHONY: help init preflight secrets build up down restart logs shell preview notes pair \
         egress-apply egress-remove egress-status scratch-sweep size pull push clean
 
 help: ## show this help
@@ -47,6 +47,9 @@ preview: ## list dev servers currently exposed
 
 notes: ## print the house rules for agents
 	$(COMPOSE) exec code agent-notes
+
+pair: ## pair a device (TTL=1h LABEL=device make pair)
+	$(COMPOSE) exec -T code pair "$(or $(TTL),1h)" "$(or $(LABEL),device)"
 
 preflight: ## check host paths, ports and bind IP before deploying
 	./scripts/preflight.sh

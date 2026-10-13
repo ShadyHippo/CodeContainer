@@ -36,6 +36,7 @@ Laptop / phone
 - [Security model](#security-model)
 - [Configuration](#configuration)
 - [Operating it](#operating-it)
+- [Pairing a device](#pairing-a-device)
 - [What's inside](#whats-inside)
 - [Building the image](#building-the-image)
 - [Repository layout](#repository-layout)
@@ -76,8 +77,7 @@ make egress-apply                           # block SSH egress (run as root)
 docker compose exec code opencode auth login   # first run, once
 ```
 
-Then open `http://<host>:3773` (or `<PUBLIC_HOST>:3773`) and pair your device.
-The pairing token printed in the logs is a password — treat it as one.
+Then pair your devices — see [Pairing a device](#pairing-a-device).
 
 If `make` isn't installed: run `./scripts/preflight.sh`,
 `docker compose up -d --build`, and `./scripts/no-ssh-egress.sh apply` directly.
@@ -198,6 +198,53 @@ never fire, and there is no cleanup on `SIGKILL`/OOM anyway.
 The scratch wipe refuses to run unless it is pointed at a real mountpoint, and
 refuses `/` and `/workspace` by name — so a misconfigured path cannot delete your
 projects.
+
+## Pairing a device
+
+```bash
+make pair                      # 1 hour token, label "device"
+make pair TTL=30d LABEL=phone  # 30 days, labelled
+```
+
+This prints a `/pair#token=...` link and a QR code. Open the link on your
+laptop, or scan the QR with your phone.
+
+**Do not use the pairing URL that T3 Code prints at startup.** It contains the
+container's *internal* address (`http://172.17.0.2:3773`), which nothing on your
+network can reach, and its token expires after 5 minutes. `make pair` binds the
+token to `PUBLIC_HOST` instead, so the link and the QR both work.
+
+The link is a credential: whoever holds it can operate the agents. Treat it
+like a password, and use a short TTL for anything you don't control.
+
+Manage issued tokens from inside the container:
+
+```bash
+docker compose exec code t3 auth pairing list
+docker compose exec code t3 auth pairing revoke <id>
+```
+
+### Phones and HTTPS
+
+The hosted client at `app.t3.codes` is served over HTTPS, and browsers refuse to
+let an HTTPS page talk to a plain-HTTP backend. Two options:
+
+- Browse straight to `http://<tailscale-ip>:3773` over the tailnet — works today.
+- Terminate TLS on the host, e.g.
+  `tailscale serve --bg --https=443 http://<tailscale-ip>:3773`, then use the
+  resulting MagicDNS HTTPS URL.
+
+`t3 serve --tailscale-serve` will **not** work here: there is deliberately no
+Tailscale inside the container.
+
+### Pairings survive restarts
+
+Pairing state lives in the `t3-data` volume (`state.sqlite` plus a persistent
+server signing key), so paired devices survive restarts, container recreation
+and image rebuilds.
+
+**Never run `docker compose down -v`.** That deletes the volumes and every
+pairing with them. Plain `down`, `up`, `restart` and `make up` are all safe.
 
 ## What's inside
 

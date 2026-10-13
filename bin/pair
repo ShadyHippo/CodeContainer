@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# pair - mint a T3 Code pairing link and QR code that actually work from your
+# phone or laptop.
+#
+# Why this exists: the URL T3 Code prints at startup contains the CONTAINER's
+# internal address (e.g. http://172.17.0.2:3773), which is unreachable from
+# your devices, and its token expires after 5 minutes. This asks the server to
+# issue a token bound to the host you really reach it on (PUBLIC_HOST), with a
+# TTL you choose.
+#
+#   pair                 # 1 hour,  label "device"
+#   pair 30d phone       # 30 days, label "phone"
+#   pair 1h laptop
+#
+# Manage issued tokens with:  t3 auth pairing list | t3 auth pairing revoke <id>
+set -euo pipefail
+
+export T3CODE_HOME="${T3CODE_HOME:-/root/.t3code}"
+
+TTL="${1:-1h}"
+LABEL="${2:-device}"
+PORT="${T3_PORT:-3773}"
+
+if [ -n "${PUBLIC_HOST:-}" ]; then
+  ADDR="${PUBLIC_HOST}"
+else
+  ADDR="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  {
+    echo "pair: PUBLIC_HOST is not set, falling back to the container address."
+    echo "pair: '${ADDR}' is almost certainly unreachable from your devices -"
+    echo "pair: set PUBLIC_HOST in compose.yaml to your Tailscale IP."
+  } >&2
+fi
+
+BASE_URL="http://${ADDR}:${PORT}"
+
+if ! out="$(t3 auth pairing create --base-url "${BASE_URL}" --ttl "${TTL}" --label "${LABEL}" 2>&1)"; then
+  printf '%s\n' "${out}" >&2
+  exit 1
+fi
+
+printf '%s\n' "${out}"
+
+url="$(printf '%s\n' "${out}" | grep -oE 'https?://[^[:space:]]+/pair#token=[A-Za-z0-9]+' | head -n1 || true)"
+if [ -n "${url}" ]; then
+  printf '\n  Open this on the device you are pairing:\n\n    %s\n\n' "${url}"
+  if command -v qrencode >/dev/null 2>&1; then
+    qrencode -t ANSIUTF8 "${url}"
+    printf '\n'
+  fi
+else
+  printf 'pair: could not parse a /pair URL out of the response\n' >&2
+  exit 1
+fi

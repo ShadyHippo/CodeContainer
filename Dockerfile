@@ -77,7 +77,7 @@ RUN set -eux; \
         libsqlite3-dev libncurses-dev liblzma-dev uuid-dev libicu-dev \
     # --- vcs + cli ------------------------------------------------------------
         git git-lfs git-delta gh direnv just \
-        jq yq ripgrep fd-find fzf bat tree htop btop ncdu fdupes \
+        jq yq ripgrep fd-find fzf bat tree htop btop ncdu fdupes qrencode \
         tmux screen vim neovim nano zsh starship \
         httpie netcat-openbsd socat dnsutils iputils-ping net-tools \
         iproute2 lsof procps psmisc pv \
@@ -261,9 +261,10 @@ COPY config/AGENTS.md /etc/codecontainer/AGENTS.md
 COPY bin/preview /usr/local/bin/preview
 COPY bin/agent-notes /usr/local/bin/agent-notes
 COPY bin/freeport /usr/local/bin/freeport
+COPY bin/pair /usr/local/bin/pair
 
 RUN set -eux; \
-    chmod 0755 /usr/local/bin/preview /usr/local/bin/agent-notes /usr/local/bin/freeport; \
+    chmod 0755 /usr/local/bin/preview /usr/local/bin/agent-notes /usr/local/bin/freeport /usr/local/bin/pair; \
     printf '\n[ -f /etc/bash.bashrc.d-codecontainer ] && . /etc/bash.bashrc.d-codecontainer\n' >> /etc/bash.bashrc; \
     printf '\n[ -f /etc/zsh/zshrc.d-codecontainer ] && . /etc/zsh/zshrc.d-codecontainer\n' >> /etc/zsh/zshrc; \
     mkdir -p /workspace; \
