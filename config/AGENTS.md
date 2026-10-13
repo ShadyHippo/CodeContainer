@@ -58,11 +58,23 @@ Anything durable goes in the project under `/workspace`.
 
 ## Toolchains
 
-Rust 1.99 · Go 1.27 · Node 24 (pnpm/yarn/bun/deno) · TypeScript · Python 3.14
-(pip/uv/venv) · Java 21 + Maven/Gradle · .NET 10 · Ruby · PHP 8.5 + Composer ·
-Elixir/Erlang · Lua · C/C++ (gcc 15, clang 21) · CMake/Ninja/Meson · ffmpeg ·
-ImageMagick · Graphviz · Pandoc · Typst · TeX Live · PostgreSQL 18 · MariaDB 11 ·
-Redis 8 · SQLite.
+**Per-project runtimes come from mise.** `rust` and `go` are installed at boot
+from mise; pin a version per project with a `mise.toml` at the project root:
+
+    mise use go@1.24        # writes/updates mise.toml
+    mise use rust@stable
+    mise install            # installs whatever mise.toml pins
+
+**Commit `mise.toml` / `.tool-versions`.** Pinning the toolchain alongside the
+code is the point — don't gitignore them.
+
+**From the image, not mise:** Node 24 (pnpm/yarn/bun/deno), TypeScript, Python
+3.14 (pip/uv/venv), Ruby, PHP 8.5 + Composer, Elixir/Erlang, Lua, C/C++ (gcc 15,
+clang 21), CMake/Ninja/Meson, ffmpeg, ImageMagick, Graphviz, Pandoc, Typst,
+TeX Live, PostgreSQL 18, MariaDB 11, Redis 8, SQLite.
+
+**Not installed at all** — add per project when needed:
+`mise use java@21`, `mise use gradle@8`, `mise use maven@3`, `mise use dotnet`.
 
 Language servers are on PATH: rust-analyzer, gopls, typescript-language-server,
 pyright, clangd, bash/yaml/json/html/css, tailwind, dockerfile.

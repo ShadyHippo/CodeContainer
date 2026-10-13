@@ -31,7 +31,7 @@ services:
       args:
         NODE_MAJOR: "24"
         GO_VERSION: "latest"
-        DOTNET_CHANNEL: "10.0"
+        # T3_VERSION: "latest"    # uncomment to leave the nightly channel
     image: ghcr.io/shadyhippo/codecontainer:latest
     container_name: codecontainer
     hostname: codecontainer
@@ -79,6 +79,12 @@ services:
     volumes:
       # EDIT ME -- the ONLY host path the container may read/write.
       - "/mnt/user/Projects:/workspace"
+
+      # -----------------------------------------------------------------------
+      # EDIT ME -- mise-managed runtimes (rust, go, anything an agent pins).
+      # Keep this OFF Docker storage: it grows to many GB as versions pile up.
+      # Put it on a pool, not the array.
+      - "${MISE_DIR:-./mise}:/mise"
 
       # -----------------------------------------------------------------------
       # EDIT ME -- big disk-backed scratch, kept OFF Docker storage.

@@ -10,6 +10,8 @@ ENABLE_OPENCODE_SERVER="${ENABLE_OPENCODE_SERVER:-1}"
 AUTO_PAIR="${AUTO_PAIR:-1}"
 PAIR_TTL="${PAIR_TTL:-3650d}"       # T3 has no "never"; 10 years is the practical
 PAIR_LABEL="${PAIR_LABEL:-boot}"    # equivalent, and it is overridable.
+MISE_AUTO_INSTALL="${MISE_AUTO_INSTALL:-1}"
+MISE_INSTALL_TIMEOUT="${MISE_INSTALL_TIMEOUT:-900}"
 
 export T3CODE_HOME
 mkdir -p /workspace "$T3CODE_HOME" "${GOPATH:-/root/go}" "${CARGO_HOME:-/usr/local/cargo}"
@@ -128,6 +130,23 @@ print_pairing() {
   printf '  ============================================================\n\n'
 }
 
+# --- per-project runtimes (mise) ----------------------------------------------
+# Non-fatal and time-boxed on purpose. If the network is down the container
+# still starts with node, Python and the C toolchain from the image - it just
+# won't have rust/go until mise can fetch them. Idempotent: already-installed
+# tools are skipped in well under a second.
+prep_mise() {
+  command -v mise >/dev/null 2>&1 || return 0
+  [ "${MISE_AUTO_INSTALL}" = "1" ] || return 0
+
+  if timeout "${MISE_INSTALL_TIMEOUT}" mise install >/tmp/mise-install.log 2>&1; then
+    echo "[entrypoint] mise ready: $(mise ls 2>/dev/null | wc -l) tool(s) installed"
+  else
+    echo "[entrypoint] mise install failed or timed out - image toolchains still available"
+    tail -3 /tmp/mise-install.log 2>/dev/null | sed 's/^/[entrypoint]   /'
+  fi
+}
+
 banner() {
   printf '\n'
   printf '  CodeContainer  |  T3 Code + OpenCode  |  Ubuntu 26.04\n'
@@ -173,7 +192,9 @@ else
 fi
 echo "[entrypoint] exec: $*"
 
-# Prints the pairing link (and a QR) into the container log once the server is up.
+# Runs in the background: the container must come up whether or not the network
+# is reachable for mise, or T3 is ready to mint a token yet.
 print_pairing &
+prep_mise &
 
 exec "$@"

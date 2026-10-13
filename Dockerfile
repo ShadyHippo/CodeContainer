@@ -13,6 +13,32 @@
 #    - one apt layer, aggressively cleaned (image size is a feature)          #
 #    - caches that matter live in volumes, not in the image                   #
 #    - no docker socket, no DinD: agents run processes against 30000-30099    #
+# =============================================================================
+# Build stage: the Go LSP / debug tools.
+#
+# Go itself is deliberately NOT in the final image - agents get it from mise
+# per project. But gopls/dlv/goimports are useful everywhere, so compile them
+# once here and copy the binaries across. They go to /usr/local/bin, NOT
+# /root/go/bin, because /root/go is a bind mount at runtime and would hide them.
+# =============================================================================
+FROM ubuntu:26.04 AS gotools
+ARG GO_VERSION=latest
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl; \
+    ARCH="$(dpkg --print-architecture)"; \
+    case "$ARCH" in amd64) GARCH=amd64 ;; arm64) GARCH=arm64 ;; *) exit 1 ;; esac; \
+    ver="${GO_VERSION}"; \
+    if [ "$ver" = "latest" ]; then ver="$(curl -fsSL 'https://go.dev/VERSION?m=text' | head -n1)"; fi; \
+    curl -fsSLo /tmp/go.tgz "https://go.dev/dl/${ver}.linux-${GARCH}.tar.gz"; \
+    tar -C /usr/local -xzf /tmp/go.tgz; \
+    rm -f /tmp/go.tgz; \
+    mkdir -p /out; \
+    GOBIN=/out /usr/local/go/bin/go install golang.org/x/tools/gopls@latest; \
+    GOBIN=/out /usr/local/go/bin/go install golang.org/x/tools/cmd/goimports@latest; \
+    GOBIN=/out /usr/local/go/bin/go install github.com/go-delve/delve/cmd/dlv@latest; \
+    ls -l /out
+
 ###############################################################################
 FROM ubuntu:26.04
 
@@ -23,10 +49,6 @@ LABEL org.opencontainers.image.title="CodeContainer" \
 
 # --- pinnable versions (override with --build-arg) ---------------------------
 ARG NODE_MAJOR=24
-ARG GO_VERSION=latest
-ARG GO_TOOLCHAIN=1.26.0
-ARG DOTNET_CHANNEL=10.0
-ARG RUST_TOOLCHAIN=stable
 ARG T3_VERSION=nightly
 ARG OPENCODE_VERSION=latest
 ARG PLAYWRIGHT_BROWSERS="chromium firefox"
@@ -39,22 +61,18 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TERM=xterm-256color \
     EDITOR=nvim \
     VISUAL=nvim \
-    DOTNET_ROOT=/usr/local/dotnet \
-    DOTNET_CLI_TELEMETRY_OPTOUT=1 \
-    DOTNET_NOLOGO=1 \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     PIPX_HOME=/root/.local/pipx \
     PIPX_BIN_DIR=/root/.local/bin \
     NODE_PATH=/usr/local/lib/node_modules:/root/.local/lib/node_modules \
     PIP_REQUIRE_VIRTUALENV=1 \
-    CARGO_INSTALL_ROOT=/root/.local \
     GIT_CONFIG_GLOBAL=/root/.config/git/config \
     GOPATH=/root/go \
-    GOTOOLCHAIN=auto \
-    CARGO_HOME=/usr/local/cargo \
-    RUSTUP_HOME=/usr/local/rustup \
-    JAVA_HOME=/usr/lib/jvm/java-21 \
-    PATH=/root/.local/bin:/root/go/bin:/usr/local/go/bin:/usr/local/dotnet:/usr/local/cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+    MISE_DATA_DIR=/mise \
+    MISE_SHIMS_DIR=/mise/shims \
+    MISE_YES=1 \
+    MISE_TRUSTED_CONFIG_PATHS=/workspace:/root \
+    PATH=/mise/shims:/root/.local/bin:/root/go/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -83,7 +101,6 @@ RUN set -eux; \
         iproute2 lsof procps psmisc pv \
     # --- language runtimes (apt-provided) -------------------------------------
         python3 python3-pip python3-venv python3-dev pipx \
-        openjdk-21-jdk maven gradle \
         ruby-full \
         php-cli php-mbstring php-xml php-curl php-zip composer \
         lua5.4 luarocks perl \
@@ -107,7 +124,6 @@ RUN set -eux; \
     # --- normalise a few binary names ----------------------------------------
     ln -sf /usr/bin/fdfind /usr/local/bin/fd; \
     ln -sf /usr/bin/batcat /usr/local/bin/bat; \
-    ln -sfn "$(readlink -f /usr/lib/jvm/java-21-openjdk-*)" /usr/lib/jvm/java-21; \
     # --- apt non-interactive defaults (agents run apt-get unattended) ---------
     printf 'APT::Get::Assume-Yes "true";\nDpkg::Options { "--force-confdef"; "--force-confold"; };\n' > /etc/apt/apt.conf.d/99-codecontainer; \
     # --- SSH is deliberately unavailable (no client, no server, no inbound) ----
@@ -152,47 +168,41 @@ RUN set -eux; \
     rm -rf /root/.npm /tmp/*
 
 # =============================================================================
-# 3. Go  (official toolchain tarball)
+# 3. Go LSP / debug tools  (compiled in the gotools stage above)
+#    Go itself comes from mise, per project.
 # =============================================================================
-ARG GO_VERSION
-ARG GO_TOOLCHAIN
+COPY --from=gotools /out/gopls /out/goimports /out/dlv /usr/local/bin/
+
+# =============================================================================
+# 4. Rust -> mise. Only rust-analyzer is kept here, so Rust LSP support does not
+#    depend on a project having a mise config.
+# =============================================================================
 RUN set -eux; \
     ARCH="$(dpkg --print-architecture)"; \
-    case "$ARCH" in amd64) GARCH=amd64 ;; arm64) GARCH=arm64 ;; *) exit 1 ;; esac; \
-    ver="${GO_VERSION}"; \
-    if [ "$ver" = "latest" ]; then ver="$(curl -fsSL 'https://go.dev/VERSION?m=text' | head -n1)"; fi; \
-    curl -fsSLo /tmp/go.tgz "https://go.dev/dl/${ver}.linux-${GARCH}.tar.gz"; \
-    tar -C /usr/local -xzf /tmp/go.tgz; \
-    rm -f /tmp/go.tgz; \
-    go version; \
-    go env -w GOTOOLCHAIN="${GO_TOOLCHAIN}+auto"; \
-    go install golang.org/x/tools/gopls@latest; \
-    go install golang.org/x/tools/cmd/goimports@latest; \
-    go install github.com/go-delve/delve/cmd/dlv@latest; \
-    go clean -modcache -cache
+    case "$ARCH" in \
+      amd64) RA=x86_64-unknown-linux-gnu ;; \
+      arm64) RA=aarch64-unknown-linux-gnu ;; \
+      *) echo "unsupported arch: $ARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSLo /tmp/ra.gz \
+      "https://github.com/rust-lang/rust-analyzer/releases/latest/download/rust-analyzer-${RA}.gz"; \
+    gunzip -c /tmp/ra.gz > /usr/local/bin/rust-analyzer; \
+    chmod 0755 /usr/local/bin/rust-analyzer; \
+    rm -f /tmp/ra.gz; \
+    rust-analyzer --version
 
 # =============================================================================
-# 4. Rust  (rustup, plus clippy/rustfmt/rust-analyzer)
+# 5. mise  (owns rust / go / dotnet per project; MISE_DATA_DIR is a bind mount)
 # =============================================================================
-ARG RUST_TOOLCHAIN
 RUN set -eux; \
-    curl -fsSL https://sh.rustup.rs -o /tmp/rustup.sh; \
-    sh /tmp/rustup.sh -y --no-modify-path --profile minimal \
-        --default-toolchain "${RUST_TOOLCHAIN}"; \
-    rm -f /tmp/rustup.sh; \
-    rustup component add clippy rustfmt rust-src rust-analyzer llvm-tools; \
-    rustc --version; cargo --version; \
-    rm -rf "${CARGO_HOME}/registry/cache" "${CARGO_HOME}/git"
+    curl -fsSL https://mise.run | sh; \
+    install -m 0755 "${HOME}/.local/bin/mise" /usr/local/bin/mise; \
+    rm -rf "${HOME}/.local/bin/mise" "${HOME}/.local/share/mise" "${HOME}/.config/mise"; \
+    mise --version
 
-# =============================================================================
-# 5. .NET
-# =============================================================================
-ARG DOTNET_CHANNEL
-RUN set -eux; \
-    curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh; \
-    bash /tmp/dotnet-install.sh --channel "${DOTNET_CHANNEL}" --install-dir /usr/local/dotnet; \
-    rm -f /tmp/dotnet-install.sh; \
-    dotnet --version
+# System-wide defaults: what `mise install` populates on first boot. The data dir
+# is a bind mount, so this is a TEMPLATE, not the installed toolchain.
+COPY config/mise.toml /etc/mise/config.toml
 
 # =============================================================================
 # 6. Python extras (uv) + Bun + Deno

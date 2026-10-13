@@ -263,12 +263,13 @@ pairing with them. Plain `down`, `up`, `restart` and `make up` are all safe.
 
 ## What's inside
 
-Ubuntu 26.04 LTS. Roughly 7.9 GB unpacked.
+Ubuntu 26.04 LTS. Roughly 5.9 GB unpacked.
 
 | Area        | Included                                                              |
 | ----------- | --------------------------------------------------------------------- |
 | Agents      | T3 Code, OpenCode, Playwright (Chromium + Firefox)                     |
-| Languages   | Rust, Go, Node 24 (pnpm/yarn/bun/deno), TypeScript, Python 3.14, Java 21, .NET 10, Ruby, PHP 8.5, Elixir/Erlang, Lua, C/C++ (gcc 15, clang 21), Fortran |
+| Languages   | Node 24 (pnpm/yarn/bun/deno), TypeScript, Python 3.14, Ruby, PHP 8.5, Elixir/Erlang, Lua, C/C++ (gcc 15, clang 21) |
+| Via mise    | **Rust and Go** out of the box; any project can pin its own (`mise use java@21`, `.tool-versions`, …) |
 | Build tools | make, CMake, Ninja, Meson, autotools, protobuf                        |
 | Databases   | PostgreSQL 18, MariaDB 11, Redis 8, SQLite (run as processes)         |
 | Docs/media  | Pandoc, Typst, TeX Live, ImageMagick, ffmpeg, Graphviz                |

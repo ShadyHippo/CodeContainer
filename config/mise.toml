@@ -1,0 +1,15 @@
+# System-wide mise defaults, baked into the image at /etc/mise/config.toml.
+#
+# This is the "what should exist on first boot" set. The entrypoint runs
+# `mise install` against it (non-fatal, time-boxed). A project's own mise.toml
+# takes precedence over this file.
+#
+# Deliberately NOT listed here:
+#   node    - the container's control plane (T3 Code) runs on the system node,
+#             so mise must never shadow it. A project may still pin its own.
+#   python  - the image ships Python 3.14; projects use venvs.
+#   java / gradle / maven / dotnet - not installed; add per project with
+#             `mise use java@21` etc. Keeps first boot fast.
+[tools]
+rust = "stable"
+go = "latest"
