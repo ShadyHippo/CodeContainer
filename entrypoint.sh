@@ -12,9 +12,11 @@ PAIR_TTL="${PAIR_TTL:-3650d}"       # T3 has no "never"; 10 years is the practic
 PAIR_LABEL="${PAIR_LABEL:-boot}"    # equivalent, and it is overridable.
 MISE_AUTO_INSTALL="${MISE_AUTO_INSTALL:-1}"
 MISE_INSTALL_TIMEOUT="${MISE_INSTALL_TIMEOUT:-900}"
+PROJECTS_DIR="${PROJECTS_DIR:-/root/Projects}"
 
-export T3CODE_HOME
-mkdir -p /workspace "$T3CODE_HOME" "${GOPATH:-/root/go}" "${CARGO_HOME:-/usr/local/cargo}"
+# The one host path the container may touch. Everything else is container-local.
+export T3CODE_HOME PROJECTS_DIR
+mkdir -p "$PROJECTS_DIR" "$T3CODE_HOME" "${GOPATH:-/root/go}" "${CARGO_HOME:-/usr/local/cargo}"
 
 # --- scratch hygiene ----------------------------------------------------------
 # /tmp is expected to be a bind mount to a host scratch dir (compose.yaml) so
@@ -30,8 +32,14 @@ scratch_refusal_reason() {
       echo "refusing to wipe the container root"
       return 1
       ;;
-    /workspace | /workspace/*)
+    /root/Projects | /root/Projects/*)
       echo "refusing to wipe the projects mount"
+      return 1
+      ;;
+    /root)
+      # Projects now live under HOME, so a stray SCRATCH_DIR=/root must never
+      # walk into them (or into ~/.config, which holds credentials).
+      echo "refusing to wipe the home directory"
       return 1
       ;;
   esac
@@ -155,7 +163,7 @@ banner() {
   printf '  OpenCode API   ->  http://<host>:%s\n' "${OPENCODE_PORT}"
   printf '  App previews   ->  http://<host>:%s-%s\n' "${PORT_BASE:-30000}" "${PORT_END:-30099}"
   printf '  ---------------------------------------------------------------\n'
-  printf '  workspace      ->  /workspace   (only host path mounted)\n'
+  printf '  projects       ->  %s   (only host path mounted)\n' "$PROJECTS_DIR"
   printf '  scratch        ->  %s\n' "${SCRATCH}"
   printf '  shell          ->  docker exec -it <container> bash\n'
   printf '  pair a device  ->  docker compose exec code pair\n'
@@ -164,10 +172,10 @@ banner() {
   printf '  T3 pairing token below is a password. Do not expose this port.\n\n'
 }
 
-# --- OpenCode (installed at runtime, never baked into the image) --------------
-# Deliberately absent from the image so there is exactly ONE copy: nothing can
-# go stale behind the bind mount. It installs into ~/.local, which is a bind
-# mount, first on PATH, and therefore survives restarts and rebuilds.
+# --- OpenCode (managed by mise, never baked into the image) --------------------
+# Deliberately absent from the image so there is exactly ONE copy and nothing
+# can go stale behind the bind mount. mise owns the version via
+# /etc/mise/config.toml, so updating it is `mise up` - no redeploy.
 #
 # This BLOCKS on purpose before T3 starts. T3 probes for the opencode provider
 # when it boots, and its periodic health checks do not re-scan, so an install
@@ -178,10 +186,9 @@ ensure_opencode() {
     return 0
   fi
 
-  local pkg="@opencode/cli@${OPENCODE_CHANNEL:-latest}"
-  echo "[entrypoint] installing ${pkg} (first boot only)..."
+  echo "[entrypoint] installing opencode via mise (first boot only)..."
   if timeout "${OPENCODE_INSTALL_TIMEOUT:-300}" \
-    npm install -g --no-fund --no-audit "$pkg" >/tmp/opencode-install.log 2>&1; then
+    mise install opencode >/tmp/opencode-install.log 2>&1; then
     hash -r 2>/dev/null || true
     echo "[entrypoint] opencode ready: $(opencode --version 2>&1 | head -1)"
   else
@@ -192,6 +199,19 @@ ensure_opencode() {
 }
 
 ensure_opencode
+
+# --- misplaced-clone guard ----------------------------------------------------
+# Projects live at $PROJECTS_DIR, which is mounted. Everything else under HOME
+# is the container's ephemeral layer and is destroyed on rebuild, so a repo
+# cloned into the wrong place vanishes later without explanation. Say so loudly.
+warn_stray_repos() {
+  local stray
+  stray="$(find "$HOME" -maxdepth 2 -name .git -not -path "${PROJECTS_DIR}/*" 2>/dev/null | head -5)"
+  [ -n "$stray" ] || return 0
+  echo "[entrypoint] !! git repo(s) OUTSIDE ${PROJECTS_DIR} - these are lost on rebuild:"
+  printf '%s\n' "$stray" | sed 's/^/[entrypoint]      /'
+}
+warn_stray_repos
 
 # --- OpenCode HTTP API --------------------------------------------------------
 # T3 Code drives the `opencode` CLI as a provider; this server is a bonus for

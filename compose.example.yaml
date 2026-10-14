@@ -70,6 +70,12 @@ services:
         soft: 1048576
         hard: 1048576
 
+    # GPU passthrough: lets agents run ffmpeg with hardware transcoding
+    # (vaapi/qsv) and anything else needing the render node. Requires the
+    # VAAPI userspace drivers, which are in the image.
+    devices:
+      - "/dev/dri:/dev/dri"
+
     # Bind to the host's Tailscale IP in production; 127.0.0.1 = host-only.
     ports:
       - "127.0.0.1:30000-30099:30000-30099" # app previews
@@ -78,7 +84,7 @@ services:
 
     volumes:
       # EDIT ME -- the ONLY host path the container may read/write.
-      - "/mnt/user/Projects:/workspace"
+      - "/mnt/user/Projects:/root/Projects"
 
       # -----------------------------------------------------------------------
       # EDIT ME -- mise-managed runtimes (rust, go, anything an agent pins).

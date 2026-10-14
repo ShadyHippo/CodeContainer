@@ -17,9 +17,9 @@ Laptop / phone
 │  ┌───────────────────────── codecontainer ─────────────────────────┐  │
 │  │  T3 Code UI (:3773) ──drives──▶ OpenCode CLI                    │  │
 │  │                                       └─▶ opencode serve (:4096) │  │
-│  │      agents run with cwd = a project under /workspace           │  │
+│  │      agents run with cwd = a project under /root/Projects           │  │
 │  │                                                                 │  │
-│  │  /workspace ◀─ bind ── /mnt/user/Projects        (rw, durable)  │  │
+│  │  /root/Projects ◀─ bind ── /mnt/user/Projects        (rw, durable)  │  │
 │  │  /tmp       ◀─ bind ── /mnt/cache/scratch/…      (wiped)        │  │
 │  │  ports 30000-30099 ◀── published ──▶ dev-server previews        │  │
 │  └─────────────────────────────────────────────────────────────────┘  │
@@ -104,7 +104,7 @@ or nothing is reachable from off-host. It defaults to `127.0.0.1`.
 
 | Container path        | Kind     | Purpose                                    |
 | --------------------- | -------- | ------------------------------------------ |
-| `/workspace`          | bind, rw | your projects — the **only** host path      |
+| `/root/Projects`          | bind, rw | your projects — the **only** host path      |
 | `/tmp`                | bind     | big disk scratch, wiped between sessions   |
 | `/secrets`            | bind, ro | credential files you drop in               |
 | `/root/.config`       | volume   | opencode config, `gh`, global git config   |
@@ -124,7 +124,7 @@ your edits survive.
 The container is given as little as possible, because the same host holds
 irreplaceable data.
 
-- **One host path, read/write:** `/workspace`. Nothing else on the host is
+- **One host path, read/write:** `/root/Projects`. Nothing else on the host is
   visible to the agents.
 - **No Docker socket, no DinD.** The container cannot create or reach other
   containers. Agents run processes instead.
@@ -141,7 +141,7 @@ irreplaceable data.
 
 **What this does not protect against:** the agents hold your GitHub token and
 your OpenCode subscription, and they can read and write everything under
-`/workspace`. Being root inside the container is by design (the host is
+`/root/Projects`. Being root inside the container is by design (the host is
 root-only), and container escape is bounded by the kernel, not by anything here.
 
 ### The apt pin is best-effort, not a guarantee
@@ -172,7 +172,7 @@ Key settings:
 
 | Setting                | Meaning                                              |
 | ---------------------- | ---------------------------------------------------- |
-| `PROJECTS_DIR`         | the one rw host path (`/workspace`)                  |
+| `PROJECTS_DIR`         | the one rw host path (`/root/Projects`)                  |
 | scratch bind           | big disk scratch, kept off Docker storage            |
 | `BIND_IP`              | interface to publish on — your Tailscale IP          |
 | `PUBLIC_HOST`          | host part of the URLs `preview` prints               |
@@ -201,7 +201,8 @@ Wipe-on-stop is deliberately *not* used: the entrypoint `exec`s T3 Code, so trap
 never fire, and there is no cleanup on `SIGKILL`/OOM anyway.
 
 The scratch wipe refuses to run unless it is pointed at a real mountpoint, and
-refuses `/` and `/workspace` by name — so a misconfigured path cannot delete your
+refuses `/`, `/root` and `/root/Projects` by name — so a misconfigured path
+cannot delete your
 projects.
 
 ## Pairing a device
@@ -278,6 +279,7 @@ Ubuntu 26.04 LTS. Roughly 5.9 GB unpacked.
 | Build tools | make, CMake, Ninja, Meson, autotools, protobuf                        |
 | Databases   | PostgreSQL 18, MariaDB 11, Redis 8, SQLite (run as processes)         |
 | Docs/media  | Pandoc, Typst, TeX Live, ImageMagick, ffmpeg, Graphviz                |
+| GPU video   | ffmpeg with vaapi/qsv/nvenc + PSNR/SSIM; `mediainfo`, `mkvtoolnix`, `vainfo`. Pass `/dev/dri` for hardware transcode. |
 | LSPs        | rust-analyzer, gopls, typescript-language-server, pyright, clangd, bash/yaml/json/html/css/tailwind/dockerfile |
 | CLI         | git + delta, gh, ripgrep, fd, fzf, bat, jq, tmux, lazygit-adjacent tooling, shellcheck, shfmt |
 

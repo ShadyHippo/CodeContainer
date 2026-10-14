@@ -7,12 +7,30 @@ the published port range below.
 
 ## Where things live
 
-- `/workspace` is the **only** host path mounted. It is the user's NAS
-  `Projects` share; every project is a subdirectory of it.
+- `~/Projects` (`/root/Projects`) is the **only** host path mounted. It is the
+  user's NAS `Projects` share; every project is a subdirectory of it.
 - You have no read/write access anywhere else on the host. You are root
-  *inside this container*, but the container can only see `/workspace`.
-- Never create files at the `/workspace` root — that pollutes the whole share.
+  *inside this container*, but the container can only see that one path.
+- Never create files at the `Projects` root — that pollutes the whole share.
   Work inside the project directory you were pointed at.
+- **Clone or init only inside `~/Projects`.** Everything else under `$HOME` is
+  the container's ephemeral layer and is destroyed on rebuild, so a repo cloned
+  into `$HOME` directly will silently vanish later. When unsure, `cd ~/Projects`
+  first.
+- **Never run recursive operations against `$HOME`** — `rm -rf ~/*`,
+  `git clean -xdff ~`, `find ~ -delete`. The projects share is mounted under it.
+
+## Citing files to the user
+
+Cite files as **absolute paths under the projects root**, for example:
+
+    /root/Projects/<repo>/src/x.ts:42
+
+T3 Code turns inline code into a link, but only for paths it recognises:
+absolute paths (under known roots such as `/root/`), `~`/`./`/`../` paths,
+relative paths containing a slash, and bare `file.ext:line`. Absolute paths are
+the robust choice because they do not depend on the session's working
+directory.
 
 ## Showing the user a running app (most important)
 
@@ -54,7 +72,7 @@ host), not the container's own storage. `TMPDIR` already points there. Use it
 freely for large intermediate files — build trees, kernel sources, archives.
 
 It is **wiped between sessions**, so never leave anything you need in `/tmp`.
-Anything durable goes in the project under `/workspace`.
+Anything durable goes in the project under `~/Projects`.
 
 ## Toolchains
 

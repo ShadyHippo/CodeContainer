@@ -42,7 +42,8 @@ else
 fi
 
 # --- host bind mounts --------------------------------------------------------
-# /workspace holds your projects and /tmp holds build scratch. On UnRaid "/" is
+# ~/Projects (/root/Projects) holds your projects and /tmp holds build scratch.
+# On UnRaid "/" is
 # a RAM disk, and Docker will CREATE a missing bind source there -- so a 40GB
 # build could silently eat RAM. Those two are hard failures. Other binds (like
 # ./secrets) are tiny and only need to exist.
@@ -75,7 +76,7 @@ if [ "$HAVE_COMPOSE" = "1" ]; then
     [ -n "$tgt" ] || continue
     case "$src" in /*) ;; *) continue ;; esac # skip named volumes
     case "$tgt" in
-      /tmp | /workspace) check_mount "$src" "$tgt" 1 ;;
+      /tmp | /root/Projects) check_mount "$src" "$tgt" 1 ;;
       *) check_mount "$src" "$tgt" 0 ;;
     esac
   done < <(docker compose config 2>/dev/null | awk '/source:/{s=$2} /target:/{print s"|"$2}')

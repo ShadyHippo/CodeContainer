@@ -17,7 +17,7 @@ compose.yaml
 .env.*
 
 # Host-side dirs
-workspace/
+Projects/
 secrets/
 scripts/
 

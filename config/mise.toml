@@ -1,15 +1,21 @@
 # System-wide mise defaults, baked into the image at /etc/mise/config.toml.
 #
 # This is the "what should exist on first boot" set. The entrypoint runs
-# `mise install` against it (non-fatal, time-boxed). A project's own mise.toml
-# takes precedence over this file.
+# `mise install` against it. A project's own mise.toml takes precedence.
 #
-# Deliberately NOT listed here:
+# Nothing here is pinned: mise resolves these each time, so tool updates never
+# require a container rebuild. Update with `mise up` inside the container.
+#
+# Deliberately NOT listed:
 #   node    - the container's control plane (T3 Code) runs on the system node,
 #             so mise must never shadow it. A project may still pin its own.
 #   python  - the image ships Python 3.14; projects use venvs.
-#   java / gradle / maven / dotnet - not installed; add per project with
-#             `mise use java@21` etc. Keeps first boot fast.
+#   java / gradle / maven / dotnet - add per project with `mise use java@21` etc.
 [tools]
 rust = "stable"
 go = "latest"
+
+# The agent itself. mise resolves this to npm:@opencode/cli (OpenCode 2), which
+# keeps the version out of the container definition entirely - no redeploy to
+# update it. Installed into MISE_DATA_DIR (a bind mount), so it persists.
+opencode = "latest"

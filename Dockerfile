@@ -70,7 +70,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     MISE_DATA_DIR=/mise \
     MISE_SHIMS_DIR=/mise/shims \
     MISE_YES=1 \
-    MISE_TRUSTED_CONFIG_PATHS=/workspace:/root \
+    MISE_TRUSTED_CONFIG_PATHS=/root/Projects:/root \
     PATH=/mise/shims:/root/.local/bin:/root/go/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -110,6 +110,9 @@ RUN set -eux; \
     # --- media + docs ---------------------------------------------------------
         imagemagick ffmpeg graphviz pandoc qpdf poppler-utils ghostscript \
         texlive-latex-base texlive-latex-recommended texlive-fonts-recommended \
+    # --- GPU video: hardware transcode. /dev/dri is passed in at runtime. ------
+        vainfo libva-drm2 intel-media-va-driver-non-free i965-va-driver \
+        mesa-libgallium mediainfo mkvtoolnix \
     # --- headless browser deps (Playwright) -----------------------------------
         libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
         libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 \
@@ -276,7 +279,7 @@ RUN set -eux; \
     chmod 0755 /usr/local/bin/preview /usr/local/bin/agent-notes /usr/local/bin/freeport /usr/local/bin/pair; \
     printf '\n[ -f /etc/bash.bashrc.d-codecontainer ] && . /etc/bash.bashrc.d-codecontainer\n' >> /etc/bash.bashrc; \
     printf '\n[ -f /etc/zsh/zshrc.d-codecontainer ] && . /etc/zsh/zshrc.d-codecontainer\n' >> /etc/zsh/zshrc; \
-    mkdir -p /workspace; \
+    mkdir -p /root/Projects; \
     git --version
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
@@ -286,7 +289,7 @@ RUN chmod 0755 /usr/local/bin/entrypoint.sh
 # instead of the container's writable layer (image-owned tools stay in /usr/local).
 ENV NPM_CONFIG_PREFIX=/root/.local
 
-WORKDIR /workspace
+WORKDIR /root/Projects
 EXPOSE 3773 4096 30000-30099
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD []
