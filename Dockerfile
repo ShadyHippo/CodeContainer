@@ -71,6 +71,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     MISE_SHIMS_DIR=/mise/shims \
     MISE_YES=1 \
     MISE_TRUSTED_CONFIG_PATHS=/root/Projects:/root \
+    BUILDAH_ISOLATION=chroot \
+    REGISTRY_AUTH_FILE=/root/.config/containers/auth.json \
     PATH=/mise/shims:/root/.local/bin:/root/go/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -113,6 +115,11 @@ RUN set -eux; \
     # --- GPU video: hardware transcode. /dev/dri is passed in at runtime. ------
         vainfo libva-drm2 intel-media-va-driver-non-free i965-va-driver \
         mesa-libgallium mediainfo mkvtoolnix \
+    # --- daemonless image building. No docker socket, ever. Requires the
+    #     container to run with security_opt: seccomp=unconfined. -------------
+    #     netavark/aardvark-dns are Recommends we would otherwise skip, and
+    #     buildah needs them to set up the build container's network.
+        buildah netavark aardvark-dns \
     # --- headless browser deps (Playwright) -----------------------------------
         libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
         libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 \
@@ -204,6 +211,7 @@ RUN set -eux; \
 
 # System-wide defaults: what `mise install` populates on first boot. The data dir
 # is a bind mount, so this is a TEMPLATE, not the installed toolchain.
+COPY config/storage.conf /etc/containers/storage.conf
 COPY config/mise.toml /etc/mise/config.toml
 
 # =============================================================================

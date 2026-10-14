@@ -92,6 +92,10 @@ services:
       # Put it on a pool, not the array.
       - "${MISE_DIR:-./mise}:/mise"
 
+      # buildah image storage. vfs copies whole layers, so this grows fast -
+      # keep it off Docker storage like everything else.
+      - "${CONTAINERS_DIR:-./containers}:/var/lib/containers"
+
       # -----------------------------------------------------------------------
       # EDIT ME -- big disk-backed scratch, kept OFF Docker storage.
       #
@@ -133,6 +137,12 @@ services:
 
     security_opt:
       - no-new-privileges:true
+      # Required for daemonless image builds (buildah needs unprivileged user
+      # namespaces). Disables the seccomp syscall filter for this container.
+      # It grants NO extra capabilities and NO access to the host docker
+      # socket - buildah still cannot start, stop or see host containers.
+      # Drop this line if you do not need `buildah`.
+      - seccomp=unconfined
 
     logging:
       driver: json-file

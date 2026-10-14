@@ -65,6 +65,24 @@ Run dev servers and anything long-lived under `tmux` (`tmux new -s work`) or
 background it properly. Work that dies with your shell is work the user cannot
 see.
 
+## Building container images
+
+You can **build and push** images, but you have **no Docker daemon and no
+socket**, and you cannot start, stop or inspect any container — not the host's,
+not your own. Use `buildah`, which builds daemonlessly:
+
+    buildah bud -t myapp:latest .              # run in the project directory
+    buildah push myapp:latest ghcr.io/you/myapp:latest
+
+- Storage driver is `vfs` and isolation is `chroot`; both are preconfigured, so
+  plain `buildah bud` works. Do not pass `--storage-driver` or `--isolation`
+  unless you have a reason.
+- `docker`, `docker compose` and `podman` are **not** available. If a project
+  ships a `docker-compose.yml`, you cannot use it — build an image instead, or
+  run the services as processes.
+- Registry credentials persist: `buildah login ghcr.io -u <user>` writes to
+  `~/.config/containers/auth.json`, which is on a bind mount.
+
 ## Scratch space
 
 `/tmp` is a large **disk-backed** scratch directory (a bind mount from the

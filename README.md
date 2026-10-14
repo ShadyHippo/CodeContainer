@@ -126,8 +126,11 @@ irreplaceable data.
 
 - **One host path, read/write:** `/root/Projects`. Nothing else on the host is
   visible to the agents.
-- **No Docker socket, no DinD.** The container cannot create or reach other
-  containers. Agents run processes instead.
+- **No Docker socket, no DinD.** The container cannot create, start, stop or
+  even see other containers. It *can* build and push images with `buildah`,
+  which needs no daemon — so you get image building without handing over
+  control of your host's containers (and without the socket, which would be
+  equivalent to root on the host).
 - **No SSH.** No client, no server, nothing listening on 22, and
   `/etc/apt/preferences.d/99-no-ssh` pins the openssh/dropbear packages to
   priority `-1` so `apt-get install openssh-client` fails.
@@ -280,6 +283,7 @@ Ubuntu 26.04 LTS. Roughly 5.9 GB unpacked.
 | Databases   | PostgreSQL 18, MariaDB 11, Redis 8, SQLite (run as processes)         |
 | Docs/media  | Pandoc, Typst, TeX Live, ImageMagick, ffmpeg, Graphviz                |
 | GPU video   | ffmpeg with vaapi/qsv/nvenc + PSNR/SSIM; `mediainfo`, `mkvtoolnix`, `vainfo`. Pass `/dev/dri` for hardware transcode. |
+| Build/push  | `buildah` — daemonless image builds and pushes. **No docker socket, ever.** Needs `security_opt: seccomp=unconfined`. |
 | LSPs        | rust-analyzer, gopls, typescript-language-server, pyright, clangd, bash/yaml/json/html/css/tailwind/dockerfile |
 | CLI         | git + delta, gh, ripgrep, fd, fzf, bat, jq, tmux, lazygit-adjacent tooling, shellcheck, shfmt |
 
