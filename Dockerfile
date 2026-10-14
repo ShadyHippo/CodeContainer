@@ -50,7 +50,6 @@ LABEL org.opencontainers.image.title="CodeContainer" \
 # --- pinnable versions (override with --build-arg) ---------------------------
 ARG NODE_MAJOR=24
 ARG T3_VERSION=nightly
-ARG OPENCODE_VERSION=latest
 ARG PLAYWRIGHT_BROWSERS="chromium firefox"
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -251,15 +250,15 @@ RUN set -eux; \
     typst --version
 
 # =============================================================================
-# 9. OpenCode (the agent)
+# 9. OpenCode is deliberately NOT installed here.
+#
+# The entrypoint installs it at runtime into ~/.local - a bind mount, and first
+# on PATH - so there is exactly ONE copy. Nothing baked into the image can go
+# stale behind a volume mount, because there is nothing to shadow. T3 Code's
+# update button in Settings > Providers updates whichever package is present.
+#
+# Channel is OPENCODE_CHANNEL (default: latest).
 # =============================================================================
-ARG OPENCODE_VERSION
-RUN set -eux; \
-    npm install -g --no-fund --no-audit "opencode-ai@${OPENCODE_VERSION}"; \
-    npm cache clean --force; \
-    rm -rf /root/.npm /tmp/*; \
-    command -v opencode; \
-    opencode --version
 
 # =============================================================================
 # 10. Shell / git defaults + helper scripts

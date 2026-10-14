@@ -82,6 +82,11 @@ Then pair your devices — see [Pairing a device](#pairing-a-device).
 If `make` isn't installed: run `./scripts/preflight.sh`,
 `docker compose up -d --build`, and `./scripts/no-ssh-egress.sh apply` directly.
 
+**First boot installs OpenCode 2** (`@opencode/cli`) into the `~/.local` bind
+mount. It is deliberately *not* baked into the image, so there is exactly one
+copy and it can never go stale behind the mount. That needs network on first
+boot only; after that it is skipped instantly. Override with `OPENCODE_CHANNEL`.
+
 ## How it works
 
 **Ports**
@@ -267,7 +272,7 @@ Ubuntu 26.04 LTS. Roughly 5.9 GB unpacked.
 
 | Area        | Included                                                              |
 | ----------- | --------------------------------------------------------------------- |
-| Agents      | T3 Code, OpenCode, Playwright (Chromium + Firefox)                     |
+| Agents      | T3 Code; **OpenCode 2 installs on first boot** (see below); Playwright (Chromium + Firefox) |
 | Languages   | Node 24 (pnpm/yarn/bun/deno), TypeScript, Python 3.14, Ruby, PHP 8.5, Elixir/Erlang, Lua, C/C++ (gcc 15, clang 21) |
 | Via mise    | **Rust and Go** out of the box; any project can pin its own (`mise use java@21`, `.tool-versions`, …) |
 | Build tools | make, CMake, Ninja, Meson, autotools, protobuf                        |

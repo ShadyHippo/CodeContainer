@@ -164,6 +164,35 @@ banner() {
   printf '  T3 pairing token below is a password. Do not expose this port.\n\n'
 }
 
+# --- OpenCode (installed at runtime, never baked into the image) --------------
+# Deliberately absent from the image so there is exactly ONE copy: nothing can
+# go stale behind the bind mount. It installs into ~/.local, which is a bind
+# mount, first on PATH, and therefore survives restarts and rebuilds.
+#
+# This BLOCKS on purpose before T3 starts. T3 probes for the opencode provider
+# when it boots, and its periodic health checks do not re-scan, so an install
+# that finished afterwards would go unnoticed until a manual refresh.
+ensure_opencode() {
+  if command -v opencode >/dev/null 2>&1; then
+    echo "[entrypoint] opencode present: $(opencode --version 2>&1 | head -1)"
+    return 0
+  fi
+
+  local pkg="@opencode/cli@${OPENCODE_CHANNEL:-latest}"
+  echo "[entrypoint] installing ${pkg} (first boot only)..."
+  if timeout "${OPENCODE_INSTALL_TIMEOUT:-300}" \
+    npm install -g --no-fund --no-audit "$pkg" >/tmp/opencode-install.log 2>&1; then
+    hash -r 2>/dev/null || true
+    echo "[entrypoint] opencode ready: $(opencode --version 2>&1 | head -1)"
+  else
+    echo "[entrypoint] !! opencode install failed - T3 will show it as unavailable"
+    tail -3 /tmp/opencode-install.log 2>/dev/null | sed 's/^/[entrypoint]   /'
+  fi
+  return 0
+}
+
+ensure_opencode
+
 # --- OpenCode HTTP API --------------------------------------------------------
 # T3 Code drives the `opencode` CLI as a provider; this server is a bonus for
 # `opencode --attach` and scripting. opencode defaults to a random port on
