@@ -90,8 +90,12 @@ seed_rules
 
 # --- pairing link -------------------------------------------------------------
 # T3's own startup URL contains the CONTAINER's address, which nothing outside
-# the host can reach, and its token dies 5 minutes after boot. Mint one bound to
-# PUBLIC_HOST instead, so the container log always holds a link that works.
+# the host can reach, and its token dies 5 minutes after boot.
+#
+# Pairings persist in the state volume, so a device pairs ONCE and stays paired
+# across restarts and rebuilds. Minting a link on every boot would churn
+# credentials and - worse - make it look like re-pairing is needed. So a link is
+# only minted when nothing is paired yet.
 print_pairing() {
   [ "$AUTO_PAIR" = "1" ] || return 0
 
@@ -100,15 +104,30 @@ print_pairing() {
     return 0
   fi
 
-  # wait for the server to answer before asking it to mint anything
+  # wait for the server to answer before asking it anything
   local i
   for i in $(seq 1 90); do
     (exec 3<>"/dev/tcp/127.0.0.1/${T3_PORT}") 2>/dev/null && break
     sleep 1
   done
 
-  # Drop UNUSED links minted by earlier boots so only one is ever valid.
-  # Consumed tokens are not "active", so paired devices are never touched.
+  local sessions
+  sessions="$(t3 auth session list --json 2>/dev/null |
+    python3 -c 'import sys, json
+try:
+    print(len(json.load(sys.stdin)))
+except Exception:
+    print(0)' 2>/dev/null || echo 0)"
+
+  if [ "${sessions:-0}" -gt 0 ]; then
+    echo "[entrypoint] ${sessions} device(s) already paired - no new link needed"
+    echo "[entrypoint] to add another device:  docker compose exec code pair"
+    return 0
+  fi
+
+  # Nothing paired yet. Drop UNUSED links minted by earlier boots so only one is
+  # ever valid. Consumed tokens are not "active", so paired devices are never
+  # touched.
   local id
   for id in $(t3 auth pairing list 2>/dev/null | grep -F "(${PAIR_LABEL})" | awk '{print $1}'); do
     t3 auth pairing revoke "$id" >/dev/null 2>&1 && echo "[entrypoint] revoked stale pairing link ${id}"
@@ -124,13 +143,17 @@ print_pairing() {
   url="$(printf '%s\n' "${out}" | grep -oE 'https?://[^[:space:]]+/pair#token=[A-Za-z0-9]+' | head -n1)"
 
   printf '\n'
-  printf '  =============== PAIRING LINK  (USE THIS ONE) ===============\n'
-  printf '  Ignore the "Pairing URL" that T3 printed above: it contains the\n'
+  printf '  ============= PAIRING LINK  (first device only) =============\n'
+  printf '  Ignore the "Pairing URL" T3 printed above: it contains the\n'
   printf '  container internal address, which nothing can reach, and its\n'
-  printf '  token dies after 5 minutes. This one works and does not expire.\n'
+  printf '  token dies after 5 minutes.\n'
+  printf '\n'
+  printf '  Pairings persist in the state volume, so this is ONE-TIME per\n'
+  printf '  device, not per boot. Add more later with:\n'
+  printf '      docker compose exec code pair\n'
   printf '\n'
   printf '    %s\n\n' "${url:-${out}}"
-  if [ -n "${url}" ] && command -v qrencode >/dev/null 2>&1; then
+  if [ -n "${url}" ] && [ "${PAIR_QR:-1}" = "1" ] && command -v qrencode >/dev/null 2>&1; then
     qrencode -t ANSIUTF8 "${url}"
     printf '\n'
   fi
