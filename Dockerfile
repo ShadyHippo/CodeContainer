@@ -299,6 +299,9 @@ RUN chmod 0755 /usr/local/bin/entrypoint.sh
 ENV NPM_CONFIG_PREFIX=/root/.local
 
 WORKDIR /root/Projects
-EXPOSE 3773 4096 30000-30099
+# Docker 29 rejects port ranges in the image's ExposedPorts (EXPOSE), even
+# though docker run / compose still support publishing them. The preview range
+# is published by compose.yaml, so only the fixed service ports belong here.
+EXPOSE 3773 4096
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD []
