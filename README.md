@@ -107,9 +107,9 @@ or nothing is reachable from off-host. It defaults to `127.0.0.1`.
 | `/root/Projects`          | bind, rw | your projects — the **only** host path      |
 | `/tmp`                | bind     | big disk scratch, wiped between sessions   |
 | `/secrets`            | bind, ro | credential files you drop in               |
-| `/root/.config`       | volume   | opencode config, `gh`, global git config   |
-| `/root/.local`        | volume   | agent-installed tooling (survives rebuild) |
-| `/root/.t3code`       | volume   | T3 Code state                              |
+| `/root/.config`       | volume or bind mount | opencode config, `gh`, global git config |
+| `/root/.local`        | volume or bind mount | agent-installed tooling (survives rebuild) |
+| `/root/.t3code`       | volume or bind mount | T3 Code state                              |
 | `/root/go`, caches    | volume   | go / npm / cargo / pip caches              |
 
 **The "where am I" trick.** Agents have no idea they're in a remote container
@@ -124,8 +124,9 @@ your edits survive.
 The container is given as little as possible, because the same host holds
 irreplaceable data.
 
-- **One host path, read/write:** `/root/Projects`. Nothing else on the host is
-  visible to the agents.
+- **One host path for your code, read/write:** `/root/Projects`. State and
+  cache bind mounts are operational (config, t3code, local, caches, scratch) and
+  do not expose any other host data.
 - **No Docker socket, no DinD.** The container cannot create, start, stop or
   even see other containers. It *can* build and push images with `buildah`,
   which needs no daemon — so you get image building without handing over
@@ -181,7 +182,35 @@ Key settings:
 | `PUBLIC_HOST`          | host part of the URLs `preview` prints               |
 | `GH_TOKEN`             | GitHub PAT for `gh` and git push over HTTPS          |
 | `SCRATCH_WIPE_ON_START`| wipe `/tmp` on start (default `1`)                   |
+| `T3_CHANNEL`           | runtime T3 Code channel override: empty (baked build), `latest` (stable), `nightly`, or a pinned version (e.g. `0.1.0`). Switches without an image rebuild |
+| `T3_VERSION`           | build arg for the T3 Code version baked into the image (default `latest` = stable). Set to `nightly` for nightly builds |
 | `SHM_SIZE`             | shared memory for headless browsers (default `4gb`)  |
+
+## Durable installs (agents and you)
+
+The image ships a large toolchain (see [What's inside](#whats-inside)), but anything
+an agent adds at runtime has to land in a **bind-mounted, persistent location**
+or it vanishes on the next rebuild. The rules:
+
+| Kind of tool | Durable location | How |
+| ------------ | ---------------- | --- |
+| Node / JS    | `/root/.local` (bind mount) | `npm install -g <pkg>` — `NPM_CONFIG_PREFIX=/root/.local` is set, and `~/.local/bin` is first on `PATH` |
+| Python       | project venv or `/root/.local` | `uv venv && uv pip install ...` inside the project (preferred), or `pip install --user` |
+| Rust / Go / Java / .NET | `/mise` (bind mount) | `mise use rust@stable`, `mise use java@21`, etc. — pinned per project via `mise.toml` |
+| Other binaries (static builds, HandBrake, …) | `/root/.local/bin` or the project dir | download/extract there; it is already on `PATH` |
+| apt packages (`apt-get install`) | **not durable** | lands in the container layer; fine for "right now", lost on rebuild. Add to the Dockerfile if you want it permanent |
+
+**So yes — an agent can install HandBrake** (`apt-get install handbrake-cli` for
+immediate use, or a static build dropped into `~/.local/bin` to survive rebuilds),
+and `ffmpeg` is already in the image. That makes workflows like "watch a folder,
+transcode with HandBrake/ffmpeg, rename into a Jellyfin-friendly layout" entirely
+feasible: T3 Code orchestrates the agent, the agent drives the CLI tools against
+files under `/root/Projects`, and results land on your durable share. Nothing
+Jellyfin-specific is preinstalled, but the agent can pull whatever client/API
+tooling it needs using the rules above.
+
+Agents are root inside the container, so `apt-get` works directly — but prefer
+the durable routes above unless the tool is genuinely a system package.
 
 ## Operating it
 
@@ -263,9 +292,9 @@ Tailscale inside the container.
 
 ### Pairings survive restarts
 
-Pairing state lives in the `t3-data` volume (`state.sqlite` plus a persistent
-server signing key), so paired devices survive restarts, container recreation
-and image rebuilds.
+Pairing state lives in `/root/.t3code` (named volume or bind mount depending on
+your compose), so paired devices survive restarts, container recreation and image
+rebuilds.
 
 **Never run `docker compose down -v`.** That deletes the volumes and every
 pairing with them. Plain `down`, `up`, `restart` and `make up` are all safe.
@@ -276,7 +305,7 @@ Ubuntu 26.04 LTS. Roughly 5.9 GB unpacked.
 
 | Area        | Included                                                              |
 | ----------- | --------------------------------------------------------------------- |
-| Agents      | T3 Code; **OpenCode 2 installs on first boot** (see below); Playwright (Chromium + Firefox) |
+| Agents      | T3 Code (stable by default); **OpenCode 2 installs on first boot** (see below); Playwright (Chromium + Firefox) |
 | Languages   | Node 24 (pnpm/yarn/bun/deno), TypeScript, Python 3.14, Ruby, PHP 8.5, Elixir/Erlang, Lua, C/C++ (gcc 15, clang 21) |
 | Via mise    | **Rust and Go** out of the box; any project can pin its own (`mise use java@21`, `.tool-versions`, …) |
 | Build tools | make, CMake, Ninja, Meson, autotools, protobuf                        |

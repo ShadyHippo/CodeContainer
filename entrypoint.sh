@@ -166,6 +166,38 @@ except Exception:
 # still starts with node, Python and the C toolchain from the image - it just
 # won't have rust/go until mise can fetch them. Idempotent: already-installed
 # tools are skipped in well under a second.
+generate_tools_block() {
+  {
+    echo "Image tools: Node 24, TypeScript, Python 3.14, Ruby, PHP 8.5, C/C++, ffmpeg, PostgreSQL 18, MariaDB 11, Redis 8, SQLite, Playwright."
+    echo
+    echo "mise-managed runtimes (mise ls):"
+    mise ls 2>/dev/null || echo "(mise not ready yet)"
+    echo
+    echo "Global npm packages (npm ls -g --depth=0):"
+    npm ls -g --depth=0 2>/dev/null || echo "(none)"
+    echo
+    echo "HandBrake: not preinstalled (install per durable rules if needed)."
+  } > /tmp/installed-tools-block.txt
+}
+
+update_tools_block() {
+  local file="$1"
+  [ -f "$file" ] || return 0
+  python3 - "$file" /tmp/installed-tools-block.txt <<'PY'
+import sys, re
+path, blockpath = sys.argv[1], sys.argv[2]
+text = open(path).read()
+block = open(blockpath).read().rstrip("\n")
+pattern = re.compile(r"<!-- BEGIN:installed-tools -->.*?<!-- END:installed-tools -->", re.S)
+new = "<!-- BEGIN:installed-tools -->\n" + block + "\n<!-- END:installed-tools -->"
+if pattern.search(text):
+    text = pattern.sub(new, text, count=1)
+else:
+    text = text.rstrip() + "\n\n" + new + "\n"
+open(path, "w").write(text)
+PY
+}
+
 prep_mise() {
   command -v mise >/dev/null 2>&1 || return 0
   [ "${MISE_AUTO_INSTALL}" = "1" ] || return 0
@@ -176,6 +208,15 @@ prep_mise() {
     echo "[entrypoint] mise install failed or timed out - image toolchains still available"
     tail -3 /tmp/mise-install.log 2>/dev/null | sed 's/^/[entrypoint]   /'
   fi
+  # Refresh the auto-generated installed-tooling block in agent rules (best effort).
+  generate_tools_block
+  for dst in \
+    "/root/.config/opencode/AGENTS.md" \
+    "/root/.codex/AGENTS.md" \
+    "/root/.claude/CLAUDE.md"
+  do
+    update_tools_block "$dst"
+  done
 }
 
 banner() {
@@ -224,14 +265,15 @@ ensure_opencode() {
 ensure_opencode
 
 # --- misplaced-clone guard ----------------------------------------------------
-# Projects live at $PROJECTS_DIR, which is mounted. Everything else under HOME
-# is the container's ephemeral layer and is destroyed on rebuild, so a repo
-# cloned into the wrong place vanishes later without explanation. Say so loudly.
+# Projects live at $PROJECTS_DIR, which is mounted. Code cloned anywhere
+# else under HOME is in the wrong place: it is not part of the projects share
+# and may be lost on rebuild (only state/cache dirs are bind-mounted). Say so
+# loudly.
 warn_stray_repos() {
   local stray
   stray="$(find "$HOME" -maxdepth 2 -name .git -not -path "${PROJECTS_DIR}/*" 2>/dev/null | head -5)"
   [ -n "$stray" ] || return 0
-  echo "[entrypoint] !! git repo(s) OUTSIDE ${PROJECTS_DIR} - these are lost on rebuild:"
+  echo "[entrypoint] !! git repo(s) OUTSIDE ${PROJECTS_DIR} - keep code in the projects share:"
   printf '%s\n' "$stray" | sed 's/^/[entrypoint]      /'
 }
 warn_stray_repos
@@ -257,10 +299,16 @@ trap cleanup EXIT INT TERM
 banner
 
 # --- T3 Code control surface (foreground / PID 1) ----------------------------
-if command -v t3 >/dev/null 2>&1; then
+# Runtime channel override: set T3_CHANNEL (e.g. "latest" for the stable
+# release, "nightly", or a pinned version like "0.1.0") to use that build even
+# when a different one is baked into the image. Unset -> use the baked `t3`.
+T3_CHANNEL="${T3_CHANNEL:-}"
+if [ -n "${T3_CHANNEL}" ]; then
+  set -- npx -y "t3@${T3_CHANNEL}" serve --host "${T3_HOST}" --port "${T3_PORT}" --no-browser --base-dir "${T3CODE_HOME}"
+elif command -v t3 >/dev/null 2>&1; then
   set -- t3 serve --host "${T3_HOST}" --port "${T3_PORT}" --no-browser --base-dir "${T3CODE_HOME}"
 else
-  set -- npx -y t3@nightly serve --host "${T3_HOST}" --port "${T3_PORT}" --no-browser --base-dir "${T3CODE_HOME}"
+  set -- npx -y "t3@${T3_VERSION:-latest}" serve --host "${T3_HOST}" --port "${T3_PORT}" --no-browser --base-dir "${T3CODE_HOME}"
 fi
 echo "[entrypoint] exec: $*"
 

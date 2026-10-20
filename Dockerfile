@@ -49,13 +49,14 @@ LABEL org.opencontainers.image.title="CodeContainer" \
 
 # --- pinnable versions (override with --build-arg) ---------------------------
 ARG NODE_MAJOR=24
-ARG T3_VERSION=nightly
+ARG T3_VERSION=latest
 ARG PLAYWRIGHT_BROWSERS="chromium firefox"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=en_US.UTF-8 \
     LC_ALL=en_US.UTF-8 \
     TZ=UTC \
+    T3_VERSION=${T3_VERSION} \
     HOME=/root \
     TERM=xterm-256color \
     EDITOR=nvim \

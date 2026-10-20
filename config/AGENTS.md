@@ -7,16 +7,17 @@ the published port range below.
 
 ## Where things live
 
-- `~/Projects` (`/root/Projects`) is the **only** host path mounted. It is the
-  user's NAS `Projects` share; every project is a subdirectory of it.
-- You have no read/write access anywhere else on the host. You are root
-  *inside this container*, but the container can only see that one path.
+- `~/Projects` (`/root/Projects`) is the projects share: the **only** place
+  for code and repos. Every project is a subdirectory of it.
+- The container may also have other host paths bind-mounted for state and
+  caches (e.g. `~/.config`, `~/.local`, `~/.t3code`, `/mise`, `/tmp`).
+  Those persist in this setup, but they are for tooling/state — **never**
+  put a repo or project there.
 - Never create files at the `Projects` root — that pollutes the whole share.
   Work inside the project directory you were pointed at.
-- **Clone or init only inside `~/Projects`.** Everything else under `$HOME` is
-  the container's ephemeral layer and is destroyed on rebuild, so a repo cloned
-  into `$HOME` directly will silently vanish later. When unsure, `cd ~/Projects`
-  first.
+- **Clone or init only inside `~/Projects`.** A repo cloned anywhere under
+  `$HOME` outside `~/Projects` is in the wrong place (and may be ephemeral
+  depending on the mount setup). When unsure, `cd ~/Projects` first.
 - **Never run recursive operations against `$HOME`** — `rm -rf ~/*`,
   `git clean -xdff ~`, `find ~ -delete`. The projects share is mounted under it.
 
@@ -107,7 +108,8 @@ code is the point — don't gitignore them.
 **From the image, not mise:** Node 24 (pnpm/yarn/bun/deno), TypeScript, Python
 3.14 (pip/uv/venv), Ruby, PHP 8.5 + Composer, Elixir/Erlang, Lua, C/C++ (gcc 15,
 clang 21), CMake/Ninja/Meson, ffmpeg, ImageMagick, Graphviz, Pandoc, Typst,
-TeX Live, PostgreSQL 18, MariaDB 11, Redis 8, SQLite.
+TeX Live, PostgreSQL 18, MariaDB 11, Redis 8, SQLite. (HandBrake is NOT
+preinstalled; install it per the durable rules above if a task needs it.)
 
 **Not installed at all** — add per project when needed:
 `mise use java@21`, `mise use gradle@8`, `mise use maven@3`, `mise use dotnet`.
@@ -118,6 +120,32 @@ pyright, clangd, bash/yaml/json/html/css, tailwind, dockerfile.
 Prefer project-local dependencies (in the project dir, which persists). Globals
 are possible — `~/.local` and `~/go` persist — but keep them rare in a shared
 image.
+
+## Durable installs (for you, the agent)
+
+The image ships a large toolchain (see below), but anything you add at runtime
+must land in a **persistent** location or it vanishes on rebuild. Prefer:
+
+- **Node/JS:** `npm install -g <pkg>` — installs into `~/.local` (bind-mounted),
+  already on `PATH`. Project-local deps go in the project dir.
+- **Python:** a venv inside the project (`uv venv && uv pip install ...`).
+  System pip is locked; do not fight it.
+- **Rust/Go/Java/.NET:** `mise use ...` — pins into `/mise` (bind-mounted).
+- **Other binaries:** download/extract into `~/.local/bin` or the project dir
+  (both on `PATH` / durable).
+- **`apt-get install`:** works and is fine for "right now", but lands in the
+  container layer and is **not durable**. Use sparingly; prefer the routes
+  above. `handbrake-cli` is not preinstalled but can be added this way (or as
+  a static build in `~/.local/bin`) for transcoding/Jellyfin-style workflows —
+  `ffmpeg` is already in the image.
+
+You are root; `apt-get` never prompts. Outbound network works for installs.
+
+## Installed tooling (auto-generated at boot)
+
+<!-- BEGIN:installed-tools -->
+Run `mise ls` and `npm ls -g --depth=0` to see currently installed tools.
+<!-- END:installed-tools -->
 
 ## Browsers
 

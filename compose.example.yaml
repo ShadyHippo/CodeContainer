@@ -31,7 +31,7 @@ services:
       args:
         NODE_MAJOR: "24"
         GO_VERSION: "latest"
-        # T3_VERSION: "latest"    # uncomment to leave the nightly channel
+        T3_VERSION: "latest"    # latest = stable release; use "nightly" for nightly builds
     image: ghcr.io/shadyhippo/codecontainer:latest
     container_name: codecontainer
     hostname: codecontainer
@@ -52,6 +52,13 @@ services:
       PORT_BASE: "30000"
       PORT_END: "30099"
       T3CODE_HOME: "/root/.t3code"
+
+      # --- T3 Code channel -------------------------------------------------
+      # Runtime override for the T3 Code control surface. Leave empty to use
+      # the version baked into the image (build arg T3_VERSION, default latest = stable).
+      # Set to "latest" for the stable release, "nightly", or a pinned version
+      # such as "0.1.0" to switch without rebuilding the image.
+      T3_CHANNEL: ""
 
       # --- scratch ---------------------------------------------------------
       # Path *inside* the container that is wiped. Leave as /tmp.
@@ -112,20 +119,20 @@ services:
       # Drop credential files here; mounted read-only.
       - "./secrets:/secrets:ro"
 
-      # --- credentials / agent state (survive rebuilds) --------------------
-      - t3-config:/root/.config
-      - t3-data:/root/.t3code
-      - agent-local:/root/.local
-      - codex-auth:/root/.codex
-      - claude-auth:/root/.claude
-
-      # --- caches (kept out of the image) ----------------------------------
-      - npm-cache:/root/.npm
-      - go-cache:/root/go
-      - cargo-registry:/usr/local/cargo/registry
-      - cargo-git:/usr/local/cargo/git
-      - pip-cache:/root/.cache
-      - bun-cache:/root/.bun
+      # -----------------------------------------------------------------------
+      # EDIT ME -- state + caches as bind mounts (no named volumes).
+      # Keep these on a pool/NVMe, not Docker storage. Paths are examples.
+      - "/mnt/user/codecontainer/config:/root/.config"
+      - "/mnt/user/codecontainer/t3code:/root/.t3code"
+      - "/mnt/user/codecontainer/local:/root/.local"
+      - "/mnt/user/codecontainer/go:/root/go"
+      - "/mnt/user/codecontainer/npm:/root/.npm"
+      - "/mnt/user/codecontainer/cache:/root/.cache"
+      - "/mnt/user/codecontainer/bun:/root/.bun"
+      - "/mnt/user/codecontainer/cargo-registry:/usr/local/cargo/registry"
+      - "/mnt/user/codecontainer/cargo-git:/usr/local/cargo/git"
+      - "/mnt/user/codecontainer/codex:/root/.codex"
+      - "/mnt/user/codecontainer/claude:/root/.claude"
 
     healthcheck:
       test:
@@ -150,15 +157,3 @@ services:
         max-size: "20m"
         max-file: "5"
 
-volumes:
-  t3-config:
-  t3-data:
-  agent-local:
-  codex-auth:
-  claude-auth:
-  npm-cache:
-  go-cache:
-  cargo-registry:
-  cargo-git:
-  pip-cache:
-  bun-cache:
