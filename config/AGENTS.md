@@ -42,10 +42,15 @@ directory.
        PORT=$(freeport)                  # picks a free port in the range
        pnpm dev --host 0.0.0.0 --port "$PORT"
 
-2. Give the user the URL `http://$PUBLIC_HOST:$PORT`.
+2. Give the user the URL `http://un.raid:$PORT`.
 
-Run `preview` to see the host and everything currently listening. Ports 3773
-(T3 Code) and 4096 (OpenCode) are taken; never assume 30000 is free.
+   Use that host literally. The T3 Code hostname (`t3code.datahippo.top`) is
+   fronted by a proxy that forwards only the app port, so a demo link on it
+   will not load. `un.raid` is the name that reaches this host directly with
+   the published port range open.
+
+Run `preview` to see the exact URLs and everything currently listening. Ports
+3773 (T3 Code) and 4096 (OpenCode) are taken; never assume 30000 is free.
 
 Ports are mapped directly, so HMR and websockets work normally — there is no
 reverse proxy and nothing to configure.
@@ -59,6 +64,28 @@ No `docker`, no `docker compose`, no DinD, no socket. If a project ships a
   processes (`service postgresql start`, `redis-server --daemonize yes`), or
   just use SQLite.
 - Services: run them as processes against the port range above.
+
+## Releasing services (docker-deploy)
+
+You cannot deploy containers yourself — no socket. A separate container,
+`docker-deploy` ([repo](https://github.com/ShadyHippo/DockerDeploy)), owns that
+and exposes one audited script per stack:
+
+    curl -s http://docker-deploy:9000/scripts              # what is callable
+    curl -s -XPOST http://docker-deploy:9000/run/easyedit  # run one
+
+- The **name is the only input**. No arguments, no paths, no shell.
+- Each script pulls (or builds) and recreates only what changed, so a run with no
+  new image is a no-op.
+- `codecontainer` recreates **this** container and therefore kills the session
+  that called it. Only call it when the user asked and the work is finished.
+- You cannot add or edit scripts. They live on the host, are written and audited
+  by the user, and are read on every request.
+- A `404` means the name is not in the allowlist; the response carries the list.
+  `rejected` in `GET /scripts` names scripts that exist but failed their
+  permission checks (owner, mode, symlink).
+- Reachable only on the internal Docker network, by that name. There is no
+  public URL and no port published to the LAN.
 
 ## Long-running work
 
@@ -173,7 +200,8 @@ prompts).
 
 ## Git — HTTPS only, no SSH
 
-SSH is not installed in this container and cannot be installed. Use HTTPS URLs:
+An sshd runs inside this container for inbound Remote-SSH, but **outbound** SSH
+is not a way out: the host firewall blocks it. Use HTTPS URLs:
 `https://github.com/owner/repo.git`, never `git@github.com:...`.
 
 Authentication comes from a GitHub token in `GH_TOKEN` (already wired into
@@ -192,8 +220,9 @@ several projects simultaneously.
 ## Network
 
 Outbound internet works (package installs, API calls). Inbound only arrives on
-30000-30099, 3773 and 4096.
+30000-30099, 3773, 4096, and (when a key is configured) SSH on 22.
 
 **Outbound SSH is blocked at the host firewall.** Do not attempt to reach tcp/22
 or tcp/2222 on the LAN or on the host itself — the connection will be refused.
-Nothing on this network wants an SSH connection from you.
+Nothing on this network wants an SSH connection from you. Inbound sshd exists
+only so the user's editor can attach; it is not a route to anywhere else.
