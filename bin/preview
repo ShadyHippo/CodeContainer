@@ -5,13 +5,15 @@ set -uo pipefail
 
 BASE="${PORT_BASE:-30000}"
 END="${PORT_END:-30099}"
+# Demo links use PREVIEW_HOST, not PUBLIC_HOST. The public T3 hostname is
+# usually fronted by a proxy that forwards only the app port, so it does not
+# work for the published preview range; un.raid is the direct LAN name.
+HOST="${PREVIEW_HOST:-un.raid}"
 HOST_HINT=""
-if [ -n "${PUBLIC_HOST:-}" ]; then
-  HOST="${PUBLIC_HOST}"
-else
+if [ -z "$HOST" ]; then
   HOST="$(hostname -I 2>/dev/null | awk '{print $1}')"
   HOST="${HOST:-<host-ip>}"
-  HOST_HINT="  !! guessed container IP - set PUBLIC_HOST to your Tailnet IP for links that work from outside"
+  HOST_HINT="  !! guessed container IP - set PREVIEW_HOST for links that work from your browser"
 fi
 
 in_range() { [ "$1" -ge "$BASE" ] 2>/dev/null && [ "$1" -le "$END" ] 2>/dev/null; }
@@ -26,14 +28,15 @@ echo "  published preview range: ${BASE}-${END}  ->  host ${HOST}"
 [ -n "$HOST_HINT" ] && echo "$HOST_HINT"
 echo
 
-declare -a listed=() unlisted=()
+declare -a listed=() unlisted=() loopback=()
 
 if command -v ss >/dev/null 2>&1; then
   while read -r _state _rq _sq local _peer proc; do
     port="${local##*:}"
     [ -z "$port" ] && continue
+    addr="${local%:*}"
     proc="${proc#users:((\"}"; proc="${proc%%\"*}"
-    listed+=("$port|$proc")
+    listed+=("$port|$addr|$proc")
   done < <(ss -H -ltnp 2>/dev/null || ss -H -ltn 2>/dev/null)
 fi
 
@@ -42,22 +45,32 @@ if [ "${#listed[@]}" -eq 0 ]; then
   exit 0
 fi
 
+# A published port is only a working link if the process binds all interfaces.
+# 127.0.0.1 in here is the container's own loopback - the host's is a different
+# one, so a loopback-bound dev server looks fine and still 404s for the user.
 for entry in "${listed[@]}"; do
-  port="${entry%%|*}"; proc="${entry##*|}"
-  if in_range "$port"; then
-    printf 'REACHABLE  '; fmt "$port" "$proc"
-  else
+  port="${entry%%|*}"; rest="${entry#*|}"; addr="${rest%%|*}"; proc="${rest##*|}"
+  if ! in_range "$port"; then
     unlisted+=("$port|$proc")
+    continue
   fi
+  case "$addr" in
+    0.0.0.0|::|\*|\[::\]) printf 'REACHABLE  '; fmt "$port" "$proc" ;;
+    *) loopback+=("$port|$addr|$proc") ;;
+  esac
 done
 
-if [ "${#unlisted[@]}" -gt 0 ]; then
+if [ "${#unlisted[@]}" -gt 0 ] || [ "${#loopback[@]}" -gt 0 ]; then
   echo
-  echo "  NOT published (only reachable inside the container):"
+  echo "  NOT reachable from the user's browser:"
   for entry in "${unlisted[@]}"; do
     port="${entry%%|*}"; proc="${entry##*|}"
-    printf '  %-6s %s\n' "$port" "$proc"
+    printf '  %-6s %-18s (port %s not published; only %s-%s is)\n' "$port" "$proc" "$port" "$BASE" "$END"
+  done
+  for entry in "${loopback[@]}"; do
+    port="${entry%%|*}"; rest="${entry#*|}"; addr="${rest%%|*}"; proc="${rest##*|}"
+    printf '  %-6s %-18s (bound to %s - rebind to 0.0.0.0)\n' "$port" "$proc" "$addr"
   done
   echo
-  echo "  Tip: bind dev servers to ${BASE}-${END} (see 'agent-notes')."
+  echo "  Tip: bind dev servers to 0.0.0.0 on ${BASE}-${END} (see 'agent-notes')."
 fi

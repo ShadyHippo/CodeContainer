@@ -12,4 +12,5 @@ services:
     network_mode: host
     ports: !reset []
     environment:
-      PUBLIC_HOST: "127.0.0.1"
+      PUBLIC_HOST: "un.raid"
+      PREVIEW_HOST: "un.raid"

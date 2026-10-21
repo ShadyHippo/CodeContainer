@@ -13,6 +13,15 @@ PAIR_LABEL="${PAIR_LABEL:-boot}"    # equivalent, and it is overridable.
 MISE_AUTO_INSTALL="${MISE_AUTO_INSTALL:-1}"
 MISE_INSTALL_TIMEOUT="${MISE_INSTALL_TIMEOUT:-900}"
 PROJECTS_DIR="${PROJECTS_DIR:-/root/Projects}"
+# Demo links. The public T3 hostname usually proxies only the app port, so the
+# published preview range gets its own host - the direct LAN/mDNS name.
+PREVIEW_HOST="${PREVIEW_HOST:-un.raid}"
+# Inbound SSH for VS Code Remote-SSH / T3's "SSH environment". Key-only: sshd
+# only starts when a public key is provided, so a container with no key is a
+# container with no SSH listener.
+ENABLE_SSH="${ENABLE_SSH:-1}"
+SSH_STATE_DIR="${SSH_STATE_DIR:-/root/.config/ssh}"
+SSH_AUTHORIZED_KEYS_FILE="${SSH_AUTHORIZED_KEYS_FILE:-/secrets/authorized_keys}"
 
 # The one host path the container may touch. Everything else is container-local.
 export T3CODE_HOME PROJECTS_DIR
@@ -173,8 +182,13 @@ generate_tools_block() {
     echo "mise-managed runtimes (mise ls):"
     mise ls 2>/dev/null || echo "(mise not ready yet)"
     echo
+    local oc npmout
+    oc="$(opencode --version 2>/dev/null | head -1)"
+    echo "OpenCode: ${oc:-not installed} (npm-global in ~/.local; T3 Code owns updates)"
+    echo
+    npmout="$(npm ls -g --depth=0 2>/dev/null || true)"
     echo "Global npm packages (npm ls -g --depth=0):"
-    npm ls -g --depth=0 2>/dev/null || echo "(none)"
+    echo "${npmout:-(none)}"
     echo
     echo "HandBrake: not preinstalled (install per durable rules if needed)."
   } > /tmp/installed-tools-block.txt
@@ -223,9 +237,9 @@ banner() {
   printf '\n'
   printf '  CodeContainer  |  T3 Code + OpenCode  |  Ubuntu 26.04\n'
   printf '  ---------------------------------------------------------------\n'
-  printf '  T3 Code UI     ->  http://<host>:%s\n' "${T3_PORT}"
-  printf '  OpenCode API   ->  http://<host>:%s\n' "${OPENCODE_PORT}"
-  printf '  App previews   ->  http://<host>:%s-%s\n' "${PORT_BASE:-30000}" "${PORT_END:-30099}"
+  printf '  T3 Code UI     ->  http://%s:%s\n' "${PUBLIC_HOST:-<host>}" "${T3_PORT}"
+  printf '  OpenCode API   ->  http://%s:%s\n' "${PREVIEW_HOST}" "${OPENCODE_PORT}"
+  printf '  App previews   ->  http://%s:%s-%s\n' "${PREVIEW_HOST}" "${PORT_BASE:-30000}" "${PORT_END:-30099}"
   printf '  ---------------------------------------------------------------\n'
   printf '  projects       ->  %s   (only host path mounted)\n' "$PROJECTS_DIR"
   printf '  scratch        ->  %s\n' "${SCRATCH}"
@@ -236,29 +250,70 @@ banner() {
   printf '  T3 pairing token below is a password. Do not expose this port.\n\n'
 }
 
-# --- OpenCode (managed by mise, never baked into the image) --------------------
-# Deliberately absent from the image so there is exactly ONE copy and nothing
-# can go stale behind the bind mount. mise owns the version via
-# /etc/mise/config.toml, so updating it is `mise up` - no redeploy.
+# --- OpenCode (npm-global in ~/.local, updated by T3 Code) --------------------
+# T3 Code only offers a working "Update now" for install kinds it can drive
+# itself (npm-global, brew, native). A mise-managed copy is classified as
+# manual: T3 shows "Update available" with no button at all, forever, because
+# `mise install` on boot never bumps a `latest` pin. So OpenCode lives where T3
+# expects a provider CLI to live - npm-global under ~/.local, a bind mount that
+# is first on PATH and survives rebuilds.
 #
 # This BLOCKS on purpose before T3 starts. T3 probes for the opencode provider
 # when it boots, and its periodic health checks do not re-scan, so an install
 # that finished afterwards would go unnoticed until a manual refresh.
+#
+# OPENCODE_CHANNEL picks the first-boot version (default: latest). After that,
+# T3 owns updates - this only fills an empty install.
+OPENCODE_PREFIX="${OPENCODE_PREFIX:-/root/.local}"
+OPENCODE_PACKAGE="${OPENCODE_PACKAGE:-@opencode/cli}"
+
+# Older images managed OpenCode with mise. /mise is a bind mount, so the install
+# and its shim outlive an image rebuild and would shadow the npm copy on PATH.
+# Remove them here rather than relying on the rebuild, and drop a stale entry
+# from the system config so the next `mise install` cannot resurrect it.
+migrate_opencode_from_mise() {
+  local config=/etc/mise/config.toml
+  if [ -e /mise/shims/opencode ] || [ -d /mise/installs/opencode ]; then
+    if command -v mise >/dev/null 2>&1; then
+      mise uninstall opencode >/dev/null 2>&1 || true
+    fi
+    # /mise is a bind mount, so a failed or partial uninstall would leave a
+    # copy that shadows the npm one on PATH. Remove the tool's tree outright.
+    rm -rf /mise/installs/opencode
+    rm -f /mise/shims/opencode
+    echo "[entrypoint] moved opencode out of mise (T3 Code owns updates now)"
+  fi
+  if [ -f "$config" ] && grep -qE '^[[:space:]]*opencode[[:space:]]*=' "$config"; then
+    sed -i -E '/^[[:space:]]*opencode[[:space:]]*=/d' "$config"
+  fi
+}
+
 ensure_opencode() {
+  migrate_opencode_from_mise
+
   if command -v opencode >/dev/null 2>&1; then
     echo "[entrypoint] opencode present: $(opencode --version 2>&1 | head -1)"
     return 0
   fi
 
-  echo "[entrypoint] installing opencode via mise (first boot only)..."
-  if timeout "${OPENCODE_INSTALL_TIMEOUT:-300}" \
-    mise install opencode >/tmp/opencode-install.log 2>&1; then
-    hash -r 2>/dev/null || true
-    echo "[entrypoint] opencode ready: $(opencode --version 2>&1 | head -1)"
-  else
-    echo "[entrypoint] !! opencode install failed - T3 will show it as unavailable"
-    tail -3 /tmp/opencode-install.log 2>/dev/null | sed 's/^/[entrypoint]   /'
+  echo "[entrypoint] installing opencode via npm into ${OPENCODE_PREFIX} (first boot only)..."
+  mkdir -p "${OPENCODE_PREFIX}/lib"
+  local log=/tmp/opencode-install.log
+  local spec="${OPENCODE_PACKAGE}@${OPENCODE_CHANNEL:-latest}"
+  if ! timeout "${OPENCODE_INSTALL_TIMEOUT:-300}" \
+    npm install -g --prefix "${OPENCODE_PREFIX}" \
+      --allow-scripts="${OPENCODE_PACKAGE}" "$spec" >"$log" 2>&1; then
+    # Older npm builds reject --allow-scripts; they run lifecycle scripts anyway.
+    echo "[entrypoint] npm rejected --allow-scripts, retrying without it"
+    if ! timeout "${OPENCODE_INSTALL_TIMEOUT:-300}" \
+      npm install -g --prefix "${OPENCODE_PREFIX}" "$spec" >>"$log" 2>&1; then
+      echo "[entrypoint] !! opencode install failed - T3 will show it as unavailable"
+      tail -3 "$log" 2>/dev/null | sed 's/^/[entrypoint]   /'
+      return 0
+    fi
   fi
+  hash -r 2>/dev/null || true
+  echo "[entrypoint] opencode ready: $(opencode --version 2>&1 | head -1)"
   return 0
 }
 
@@ -278,6 +333,81 @@ warn_stray_repos() {
 }
 warn_stray_repos
 
+# --- inbound SSH (VS Code Remote-SSH, T3 SSH environments) --------------------
+# T3's "Open in VS Code" builds vscode://vscode-remote/ssh-remote+<host><path>:
+# no port, no path translation. It only works if <host> is SSH-reachable and
+# has the same absolute paths, i.e. if this container *is* the SSH target.
+#
+# Key-only, root login restricted to keys. Nothing starts unless a key is
+# present - an sshd nobody can authenticate to is just an open port.
+#
+# Host keys live in SSH_STATE_DIR (/root/.config is a bind mount) so rebuilds do
+# not change the fingerprint and re-prompt every client.
+start_sshd() {
+  [ "${ENABLE_SSH}" = "1" ] || { echo "[entrypoint] sshd disabled (ENABLE_SSH=0)"; return 0; }
+  command -v sshd >/dev/null 2>&1 || { echo "[entrypoint] sshd missing - rebuild the image"; return 0; }
+
+  local keys_file=""
+  if [ -s "${SSH_AUTHORIZED_KEYS_FILE}" ]; then
+    keys_file="${SSH_AUTHORIZED_KEYS_FILE}"
+  elif [ -z "${SSH_AUTHORIZED_KEYS:-}" ]; then
+    echo "[entrypoint] sshd not started: no key in ${SSH_AUTHORIZED_KEYS_FILE}"
+    echo "[entrypoint]   (drop an ed25519/rsa public key there to enable Remote-SSH)"
+    return 0
+  fi
+
+  install -d -m 0700 "${SSH_STATE_DIR}" /root/.ssh /run/sshd
+  if [ ! -f "${SSH_STATE_DIR}/host_ed25519" ]; then
+    ssh-keygen -q -t ed25519 -N '' -C "codecontainer@$(hostname)" \
+      -f "${SSH_STATE_DIR}/host_ed25519"
+  fi
+
+  if [ -n "$keys_file" ]; then
+    install -m 0600 "${keys_file}" /root/.ssh/authorized_keys
+  else
+    printf '%s\n' "${SSH_AUTHORIZED_KEYS}" \
+      | grep -v '^[[:space:]]*$' > /root/.ssh/authorized_keys
+    chmod 0600 /root/.ssh/authorized_keys
+  fi
+
+  cat > "${SSH_STATE_DIR}/sshd_config" <<EOF
+Port 22
+ListenAddress 0.0.0.0
+HostKey ${SSH_STATE_DIR}/host_ed25519
+PidFile /run/sshd.pid
+AuthorizedKeysFile /root/.ssh/authorized_keys
+PermitRootLogin prohibit-password
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+UsePAM no
+UseDNS no
+AllowTcpForwarding yes
+AllowAgentForwarding no
+X11Forwarding no
+PermitTunnel no
+GatewayPorts no
+PrintMotd no
+AcceptEnv LANG LC_*
+Subsystem sftp internal-sftp
+LogLevel VERBOSE
+EOF
+
+  if /usr/sbin/sshd -f "${SSH_STATE_DIR}/sshd_config" -E /tmp/sshd.log; then
+    echo "[entrypoint] sshd listening on 22 (key-only, $(wc -l < /root/.ssh/authorized_keys) key(s))"
+  else
+    echo "[entrypoint] !! sshd failed to start - see /tmp/sshd.log"
+    tail -3 /tmp/sshd.log 2>/dev/null | sed 's/^/[entrypoint]   /'
+  fi
+}
+
+# VS Code installs its remote server into ~/.vscode-server; keep it on the
+# persisted ~/.local bind mount so rebuilds do not re-download it.
+install -d /root/.local/vscode-server
+[ -e /root/.vscode-server ] || ln -s /root/.local/vscode-server /root/.vscode-server
+
+start_sshd
+
 # --- OpenCode HTTP API --------------------------------------------------------
 # T3 Code drives the `opencode` CLI as a provider; this server is a bonus for
 # `opencode --attach` and scripting. opencode defaults to a random port on
@@ -292,6 +422,9 @@ fi
 cleanup() {
   if [ -n "${OPENCODE_PID}" ] && kill -0 "${OPENCODE_PID}" 2>/dev/null; then
     kill "${OPENCODE_PID}" 2>/dev/null || true
+  fi
+  if [ -f /run/sshd.pid ]; then
+    kill "$(cat /run/sshd.pid)" 2>/dev/null || true
   fi
 }
 trap cleanup EXIT INT TERM

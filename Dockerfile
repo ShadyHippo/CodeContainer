@@ -74,7 +74,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     MISE_TRUSTED_CONFIG_PATHS=/root/Projects:/root \
     BUILDAH_ISOLATION=chroot \
     REGISTRY_AUTH_FILE=/root/.config/containers/auth.json \
-    PATH=/mise/shims:/root/.local/bin:/root/go/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+    PATH=/root/.local/bin:/mise/shims:/root/go/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -126,7 +126,12 @@ RUN set -eux; \
         libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 \
         libpango-1.0-0 libcairo2 libasound2t64 libatspi2.0-0 \
         libx11-xcb1 libxcb-dri3-0 libxtst6 libxss1 libgtk-3-0 \
-        fonts-dejavu-core fonts-liberation fonts-noto-color-emoji fonts-noto-cjk; \
+        fonts-dejavu-core fonts-liberation fonts-noto-color-emoji fonts-noto-cjk \
+    # --- inbound SSH, for VS Code Remote-SSH and T3's SSH environments --------
+    #     Key-only and opt-in; the entrypoint starts sshd only when a public key
+    #     is supplied. Brings openssh-client along as a dependency. Outbound SSH
+    #     is still blocked at the host firewall - this is not a way out.
+        openssh-server; \
     # --- locale ---------------------------------------------------------------
     sed -i 's/^# *\(en_US.UTF-8\)/\1/' /etc/locale.gen; \
     locale-gen; \
@@ -136,8 +141,8 @@ RUN set -eux; \
     ln -sf /usr/bin/batcat /usr/local/bin/bat; \
     # --- apt non-interactive defaults (agents run apt-get unattended) ---------
     printf 'APT::Get::Assume-Yes "true";\nDpkg::Options { "--force-confdef"; "--force-confold"; };\n' > /etc/apt/apt.conf.d/99-codecontainer; \
-    # --- SSH is deliberately unavailable (no client, no server, no inbound) ----
-    printf 'Package: openssh-client openssh-server openssh-sftp-server dropbear dropbear-bin\nPin: release *\nPin-Priority: -1\n' > /etc/apt/preferences.d/99-no-ssh; \
+    # --- dropbear stays unavailable; openssh is allowed (installed above) ------
+    printf 'Package: dropbear dropbear-bin\nPin: release *\nPin-Priority: -1\n' > /etc/apt/preferences.d/99-no-ssh; \
     # --- cleanup ---------------------------------------------------------------
     apt-get clean; \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /var/cache/apt/*
@@ -264,10 +269,13 @@ RUN set -eux; \
 # =============================================================================
 # 9. OpenCode is deliberately NOT installed here.
 #
-# The entrypoint installs it at runtime into ~/.local - a bind mount, and first
-# on PATH - so there is exactly ONE copy. Nothing baked into the image can go
-# stale behind a volume mount, because there is nothing to shadow. T3 Code's
-# update button in Settings > Providers updates whichever package is present.
+# T3 Code drives provider CLIs and can only one-click update installs it
+# recognises. A mise-managed copy looks "manual" to it - it reports the update
+# but cannot perform it - so OpenCode is installed the way T3 expects a provider
+# CLI to be: npm-global into ~/.local (a bind mount, and first on PATH above).
+#
+# The entrypoint fills that install on first boot; after that "Update now" in
+# Settings > Providers is the update path, and it survives rebuilds.
 #
 # Channel is OPENCODE_CHANNEL (default: latest).
 # =============================================================================

@@ -44,7 +44,8 @@ services:
       # EDIT ME
       # ---------------------------------------------------------------------
       TZ: "UTC"
-      PUBLIC_HOST: "100.x.y.z" # your Tailscale IP (host part of preview URLs)
+      PUBLIC_HOST: "100.x.y.z" # host part of pairing links (T3 Code UI)
+      PREVIEW_HOST: "un.raid" # host part of demo links; a name that reaches the host directly (LAN/mDNS), since a public T3 hostname usually proxies only the app port
       GH_TOKEN: "" # GitHub PAT: used by gh + git's credential helper
       GITHUB_TOKEN: "" # same value; some tools look for this name
 
@@ -52,6 +53,13 @@ services:
       PORT_BASE: "30000"
       PORT_END: "30099"
       T3CODE_HOME: "/root/.t3code"
+
+      # --- inbound SSH ------------------------------------------------------
+      # Key-only sshd for VS Code Remote-SSH and T3's SSH environments. Put your
+      # public key in <secrets>/authorized_keys (mounted at /secrets) and the
+      # entrypoint starts sshd on 22. With no key it stays off.
+      ENABLE_SSH: "1"
+      SSH_AUTHORIZED_KEYS_FILE: "/secrets/authorized_keys"
 
       # --- T3 Code channel -------------------------------------------------
       # Runtime override for the T3 Code control surface. Leave empty to use
@@ -88,6 +96,11 @@ services:
       - "127.0.0.1:30000-30099:30000-30099" # app previews
       - "127.0.0.1:3773:3773" # T3 Code UI
       - "127.0.0.1:4096:4096" # OpenCode API
+      # VS Code Remote-SSH / T3 "SSH environment". Needs a public key in
+      # /secrets/authorized_keys or SSH_AUTHORIZED_KEYS, otherwise the
+      # entrypoint leaves sshd off. With a dedicated (ipvlan) container IP you
+      # drop this line and use port 22 directly.
+      - "127.0.0.1:2222:22"
 
     volumes:
       # EDIT ME -- the ONLY host path the container may read/write.

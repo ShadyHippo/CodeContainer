@@ -15,7 +15,12 @@
 rust = "stable"
 go = "latest"
 
-# The agent itself. mise resolves this to npm:@opencode/cli (OpenCode 2), which
-# keeps the version out of the container definition entirely - no redeploy to
-# update it. Installed into MISE_DATA_DIR (a bind mount), so it persists.
-opencode = "latest"
+# Deliberately NOT opencode.
+#
+# T3 Code owns provider CLIs, and only offers a working "Update now" for install
+# kinds it can drive itself (npm-global, brew, native). Anything under /mise is
+# classified as manual: T3 shows "Update available" with no button, and
+# `mise install` on boot never bumps a "latest" pin - so that nag is permanent.
+#
+# OpenCode is therefore npm-installed into ~/.local (a bind mount, first on
+# PATH) and updated from Settings > Providers. See entrypoint.sh.
