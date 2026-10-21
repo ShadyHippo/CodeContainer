@@ -37,23 +37,23 @@ directory.
 
 `localhost` is meaningless here. To show something:
 
-1. Bind to `0.0.0.0` on a port in **30000-30099** — the only published range.
+1. Bind to `0.0.0.0` — never `127.0.0.1`. Use `PORT=$(freeport)` and pass it in:
 
-       PORT=$(freeport)                  # picks a free port in the range
        pnpm dev --host 0.0.0.0 --port "$PORT"
 
-2. Give the user the URL `http://un.raid:$PORT`.
+   Prefer **30000-30099**: it is the convention, and it is the only range that
+   works when this container is reached through published ports. On its own LAN
+   address, any port works.
 
-   Use that host literally. The T3 Code hostname (`t3code.datahippo.top`) is
-   fronted by a proxy that forwards only the app port, so a demo link on it
-   will not load. `un.raid` is the name that reaches this host directly with
-   the published port range open.
+2. Give the user `http://<PREVIEW_HOST>:<PORT>`. Run `preview` — it prints the
+   exact URL for every listener and flags anything bound to loopback, which
+   looks fine in here and 404s for the user.
 
-Run `preview` to see the exact URLs and everything currently listening. Ports
-3773 (T3 Code) and 4096 (OpenCode) are taken; never assume 30000 is free.
+   Do not build demo links from the T3 Code hostname: it is fronted by a proxy
+   that forwards only the app port.
 
-Ports are mapped directly, so HMR and websockets work normally — there is no
-reverse proxy and nothing to configure.
+Ports 3773 (T3 Code) and 4096 (OpenCode) are taken; never assume 30000 is free.
+Ports are direct — no reverse proxy — so HMR and websockets behave normally.
 
 ## There is no Docker here
 

@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
 # preview - show listening TCP services in this container and how to reach them
-# from the host / tailnet.
+# from the user's browser.
 set -uo pipefail
 
-BASE="${PORT_BASE:-30000}"
-END="${PORT_END:-30099}"
-# Demo links use PREVIEW_HOST, not PUBLIC_HOST. The public T3 hostname is
-# usually fronted by a proxy that forwards only the app port, so it does not
-# work for the published preview range; un.raid is the direct LAN name.
+# Two modes:
+#   PORT_BASE/PORT_END set   - the container is reached through published ports,
+#                              so only that range is reachable.
+#   PORT_BASE/PORT_END unset - the container has its own LAN address (ipvlan /
+#                              macvlan / host networking), so every port is.
+BASE="${PORT_BASE:-}"
+END="${PORT_END:-}"
+
+# Demo links use PREVIEW_HOST, not PUBLIC_HOST. The public T3 hostname usually
+# forwards only the app port; this must be the name (or address) that reaches
+# the container itself.
 HOST="${PREVIEW_HOST:-un.raid}"
 HOST_HINT=""
 if [ -z "$HOST" ]; then
@@ -16,15 +22,21 @@ if [ -z "$HOST" ]; then
   HOST_HINT="  !! guessed container IP - set PREVIEW_HOST for links that work from your browser"
 fi
 
-in_range() { [ "$1" -ge "$BASE" ] 2>/dev/null && [ "$1" -le "$END" ] 2>/dev/null; }
+in_range() {
+  [ -z "$BASE" ] && return 0
+  [ "$1" -ge "$BASE" ] 2>/dev/null && [ "$1" -le "$END" ] 2>/dev/null
+}
 
 fmt() {
-  local port="$1" proc="$2"
-  printf '  http://%s:%-6s %s\n' "$HOST" "$port" "$proc"
+  printf '  http://%s:%-6s %s\n' "$HOST" "$1" "$2"
 }
 
 echo "CodeContainer :: listening services"
-echo "  published preview range: ${BASE}-${END}  ->  host ${HOST}"
+if [ -z "$BASE" ]; then
+  echo "  own address: every port reachable  ->  host ${HOST}"
+else
+  echo "  published preview range: ${BASE}-${END}  ->  host ${HOST}"
+fi
 [ -n "$HOST_HINT" ] && echo "$HOST_HINT"
 echo
 
@@ -72,5 +84,9 @@ if [ "${#unlisted[@]}" -gt 0 ] || [ "${#loopback[@]}" -gt 0 ]; then
     printf '  %-6s %-18s (bound to %s - rebind to 0.0.0.0)\n' "$port" "$proc" "$addr"
   done
   echo
-  echo "  Tip: bind dev servers to 0.0.0.0 on ${BASE}-${END} (see 'agent-notes')."
+  if [ -z "$BASE" ]; then
+    echo "  Tip: bind dev servers to 0.0.0.0 (see 'agent-notes')."
+  else
+    echo "  Tip: bind dev servers to 0.0.0.0 on ${BASE}-${END} (see 'agent-notes')."
+  fi
 fi

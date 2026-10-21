@@ -239,7 +239,11 @@ banner() {
   printf '  ---------------------------------------------------------------\n'
   printf '  T3 Code UI     ->  http://%s:%s\n' "${PUBLIC_HOST:-<host>}" "${T3_PORT}"
   printf '  OpenCode API   ->  http://%s:%s\n' "${PREVIEW_HOST}" "${OPENCODE_PORT}"
-  printf '  App previews   ->  http://%s:%s-%s\n' "${PREVIEW_HOST}" "${PORT_BASE:-30000}" "${PORT_END:-30099}"
+  if [ -n "${PORT_BASE:-}" ]; then
+    printf '  App previews   ->  http://%s:%s-%s\n' "${PREVIEW_HOST}" "${PORT_BASE}" "${PORT_END:-30099}"
+  else
+    printf '  App previews   ->  http://%s:<port>\n' "${PREVIEW_HOST}"
+  fi
   printf '  ---------------------------------------------------------------\n'
   printf '  projects       ->  %s   (only host path mounted)\n' "$PROJECTS_DIR"
   printf '  scratch        ->  %s\n' "${SCRATCH}"

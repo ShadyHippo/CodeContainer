@@ -33,6 +33,7 @@ Laptop / phone
 - [What it is](#what-it-is)
 - [Quick start](#quick-start)
 - [How it works](#how-it-works)
+- [Networking](#networking)
 - [Security model](#security-model)
 - [Configuration](#configuration)
 - [Operating it](#operating-it)
@@ -55,11 +56,44 @@ that orchestrates provider CLIs (Codex, Claude, Cursor, Grok, OpenCode). It ship
 none of them. Here it drives **OpenCode**, which is the actual agent.
 
 **There is no `localhost` you can see.** The container runs on a remote box, so
-"open it in a browser" is meaningless. Agents show you work by binding a port in
-**30000-30099**, which are published to the host. Ports are mapped directly (no
-reverse proxy), so HMR and websockets behave normally. You reach them at
-`http://<PREVIEW_HOST>:<port>` — the host that has the port range open, not the
-public T3 hostname.
+"open it in a browser" is meaningless. Agents show you work by binding `0.0.0.0`
+on a port. With published ports that must be in **30000-30099**; with its own LAN
+address (below) any port works. Either way you open
+`http://<PREVIEW_HOST>:<port>` — the name that reaches the container, not the
+public T3 hostname. Ports are direct (no reverse proxy), so HMR and websockets
+behave normally.
+
+## Networking
+
+There are two ways to reach the container, and they change what agents may bind:
+
+**Published ports (default).** `compose.example.yaml` publishes 30000-30099 to
+the host. Agents stay in that range; `preview` filters to it, and anything bound
+to `127.0.0.1` is flagged because it is unreachable from your machine.
+
+**Its own LAN address (ipvlan/macvlan).** Give the container a static address and
+it behaves like a host: any port, no `ports:` block, no mapping range.
+`compose.ipvlan.yaml` is an overlay for that:
+
+```bash
+docker network create -d ipvlan \
+  --subnet=192.168.0.0/24 --gateway=192.168.0.1 \
+  -o parent=br0 -o ipvlan_mode=l2 br0
+
+docker compose -f compose.yaml -f compose.ipvlan.yaml up -d
+```
+
+Keep the container attached to its normal bridge network as well, so a reverse
+proxy and the deploy sidecar still reach it by name. Set `PREVIEW_HOST` to the
+name that resolves to that address; with `PORT_BASE`/`PORT_END` unset, `preview`
+treats every listening port as reachable.
+
+What bites with an own address:
+
+- the **host cannot reach it** (kernel isolation), so test from another machine
+- host-side firewall rules no longer see its traffic — egress filtering has to
+  happen inside the container
+- it sits directly on the LAN, so every port it binds is exposed to that subnet
 
 ## Quick start
 

@@ -1,0 +1,31 @@
+# Optional overlay: give the container its own LAN address instead of relying on
+# published ports. Every port it binds is then reachable directly, which is
+# handy for agents (no 30000-30099 range) and required for SSH on port 22.
+#
+#   docker network create -d ipvlan \
+#     --subnet=192.168.0.0/24 --gateway=192.168.0.1 \
+#     -o parent=br0 -o ipvlan_mode=l2 br0
+#
+#   docker compose -f compose.yaml -f compose.ipvlan.yaml up -d
+#
+# The ordinary bridge network stays attached, so a reverse proxy and the deploy
+# sidecar still reach the container by name. IP addresses are example values.
+#
+# Notes:
+#   - the host itself cannot reach the container's LAN address (kernel
+#     isolation); test from another machine
+#   - host-side firewall rules no longer see this container's traffic, so move
+#     any egress filtering inside the container
+#   - `ports:` is reset: publishing would be ignored and only confuses things
+
+services:
+  code:
+    ports: !reset []
+    networks:
+      default: {}
+      br0:
+        ipv4_address: 192.168.0.25
+
+networks:
+  br0:
+    external: true
