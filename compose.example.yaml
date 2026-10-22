@@ -129,7 +129,8 @@ services:
       # layer -- i.e. inside UnRaid's Docker storage, which you do not want.
       - "/mnt/cache/scratch/codecontainer:/tmp"
 
-      # Drop credential files here; mounted read-only.
+      # sshd authorized_keys only. GH_TOKEN is an environment variable above,
+      # never a file in here.
       - "./secrets:/secrets:ro"
 
       # -----------------------------------------------------------------------

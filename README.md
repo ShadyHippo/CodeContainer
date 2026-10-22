@@ -152,7 +152,7 @@ or nothing is reachable from off-host. It defaults to `127.0.0.1`.
 | --------------------- | -------- | ------------------------------------------ |
 | `/root/Projects`          | bind, rw | your projects — the **only** host path      |
 | `/tmp`                | bind     | big disk scratch, wiped between sessions   |
-| `/secrets`            | bind, ro | credential files you drop in               |
+| `/secrets`            | bind, ro | sshd `authorized_keys`; **not** where `GH_TOKEN` lives |
 | `/root/.config`       | volume or bind mount | opencode config, `gh`, global git config |
 | `/root/.local`        | volume or bind mount | agent-installed tooling (survives rebuild) |
 | `/root/.t3code`       | volume or bind mount | T3 Code state                              |
@@ -191,7 +191,8 @@ irreplaceable data.
   ipvlan/macvlan container bypasses it entirely (see [Gotchas](#gotchas)).
 - **No inbound except the published range + SSH.** `no-new-privileges: true`.
 - **Git over HTTPS only**, authenticated by `GH_TOKEN` via git's credential
-  helper.
+  helper. `GH_TOKEN`/`GITHUB_TOKEN` are read from the environment only — there
+  is no file or `/secrets` fallback.
 
 **What this does not protect against:** the agents hold your GitHub token and
 your OpenCode subscription, and they can read and write everything under

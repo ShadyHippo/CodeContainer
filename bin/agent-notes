@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # agent-notes - print the environment rules that agents in this box follow.
-# Single source of truth: /etc/codecontainer/AGENTS.md (seeded into the agents'
-# config dirs on startup).
+#
+# The live copy has the generated "installed tooling" block filled in by the
+# entrypoint; /etc holds the template it was seeded from. Prefer the live one.
 set -euo pipefail
 
-for src in /etc/codecontainer/AGENTS.md /root/.config/opencode/AGENTS.md; do
+for src in /root/.config/opencode/AGENTS.md /etc/codecontainer/AGENTS.md; do
   if [ -f "$src" ]; then exec cat "$src"; fi
 done
 

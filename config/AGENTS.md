@@ -205,8 +205,9 @@ An sshd runs inside this container for inbound Remote-SSH, but **outbound** SSH
 is not a way out: the host firewall blocks it. Use HTTPS URLs:
 `https://github.com/owner/repo.git`, never `git@github.com:...`.
 
-Authentication comes from a GitHub token in `GH_TOKEN` (already wired into
-`gh` and into git's credential helper). If `GH_TOKEN` is unset, run
+Authentication comes from a GitHub token in `GH_TOKEN`, an **environment
+variable supplied by compose**. It is not read from a file, from `/secrets`, or
+from anywhere else — do not look for one. If `GH_TOKEN` is unset, run
 `gh auth login` once — the credential is stored in a persistent volume.
 
 Never commit secrets, tokens, or `.env` files.
