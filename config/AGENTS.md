@@ -142,7 +142,8 @@ preinstalled; install it per the durable rules above if a task needs it.)
 `mise use java@21`, `mise use gradle@8`, `mise use maven@3`, `mise use dotnet`.
 
 Language servers are on PATH: rust-analyzer, gopls, typescript-language-server,
-pyright, clangd, bash/yaml/json/html/css, tailwind, dockerfile.
+pyright, clangd, lua-language-server, bash/yaml/json/html/css, tailwind,
+dockerfile.
 
 Prefer project-local dependencies (in the project dir, which persists). Globals
 are possible — `~/.local` and `~/go` persist — but keep them rare in a shared

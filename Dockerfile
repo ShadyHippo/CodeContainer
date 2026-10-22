@@ -302,6 +302,38 @@ RUN set -eux; \
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 0755 /usr/local/bin/entrypoint.sh
 
+# =============================================================================
+# 11. Language servers, in their own layers
+#
+# Deliberately LAST: adding one of these does not invalidate the big apt layer
+# or anything after it, so a rebuild only fetches these few MB.
+# =============================================================================
+
+# clangd is the one LSP the VS Code extension does not bundle - it looks for the
+# binary on PATH. Matches the clang 21 already installed above.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends clangd; \
+    clangd --version; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /var/cache/apt/*
+
+# Lua has no apt package. Official release tarball; the archive has no
+# top-level directory, so it unpacks straight into /opt.
+ARG LUA_LS_VERSION=3.19.2
+RUN set -eux; \
+    ARCH="$(dpkg --print-architecture)"; \
+    case "$ARCH" in \
+      amd64) LLS=x64 ;; \
+      arm64) LLS=arm64 ;; \
+      *) echo "unsupported arch: $ARCH" >&2; exit 1 ;; \
+    esac; \
+    mkdir -p /opt/lua-language-server; \
+    curl -fsSL "https://github.com/LuaLS/lua-language-server/releases/download/${LUA_LS_VERSION}/lua-language-server-${LUA_LS_VERSION}-linux-${LLS}.tar.gz" \
+      | tar -xz -C /opt/lua-language-server; \
+    ln -sf /opt/lua-language-server/bin/lua-language-server /usr/local/bin/lua-language-server; \
+    lua-language-server --version
+
 # Runtime-only: agent-installed npm globals land in the persisted ~/.local
 # instead of the container's writable layer (image-owned tools stay in /usr/local).
 ENV NPM_CONFIG_PREFIX=/root/.local

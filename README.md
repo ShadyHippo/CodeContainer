@@ -468,7 +468,7 @@ Ubuntu 26.04 LTS. Roughly 5.9 GB unpacked.
 | Docs/media  | Pandoc, Typst, TeX Live, ImageMagick, ffmpeg, Graphviz                |
 | GPU video   | ffmpeg with vaapi/qsv/nvenc + PSNR/SSIM; `mediainfo`, `mkvtoolnix`, `vainfo`. Pass `/dev/dri` for hardware transcode. |
 | Build/push  | `buildah` — daemonless image builds and pushes. **No docker socket, ever.** Needs `security_opt: seccomp=unconfined`. |
-| LSPs        | rust-analyzer, gopls, typescript-language-server, pyright, clangd, bash/yaml/json/html/css/tailwind/dockerfile |
+| LSPs        | rust-analyzer, gopls, clangd, lua-language-server, typescript-language-server, pyright, bash/yaml/json/html/css/tailwind/dockerfile |
 | CLI         | git + delta, gh, ripgrep, fd, fzf, bat, jq, tmux, lazygit-adjacent tooling, shellcheck, shfmt |
 
 Python is locked to venvs (`PIP_REQUIRE_VIRTUALENV=1`) — a bare `pip install`
