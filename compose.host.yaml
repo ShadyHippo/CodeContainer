@@ -12,5 +12,5 @@ services:
     network_mode: host
     ports: !reset []
     environment:
-      PUBLIC_HOST: "un.raid"
-      PREVIEW_HOST: "un.raid"
+      PUBLIC_HOST: "192.168.1.50" # EDIT ME: this host's address
+      PREVIEW_HOST: "192.168.1.50" # EDIT ME: the address this container is reachable on

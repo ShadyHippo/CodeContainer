@@ -15,7 +15,7 @@ MISE_INSTALL_TIMEOUT="${MISE_INSTALL_TIMEOUT:-900}"
 PROJECTS_DIR="${PROJECTS_DIR:-/root/Projects}"
 # Demo links. The public T3 hostname usually proxies only the app port, so the
 # published preview range gets its own host - the direct LAN/mDNS name.
-PREVIEW_HOST="${PREVIEW_HOST:-un.raid}"
+PREVIEW_HOST="${PREVIEW_HOST:-}"
 # Inbound SSH for VS Code Remote-SSH / T3's "SSH environment". Key-only: sshd
 # only starts when a public key is provided, so a container with no key is a
 # container with no SSH listener.
@@ -240,9 +240,9 @@ banner() {
   printf '  T3 Code UI     ->  http://%s:%s\n' "${PUBLIC_HOST:-<host>}" "${T3_PORT}"
   printf '  OpenCode API   ->  http://%s:%s\n' "${PREVIEW_HOST}" "${OPENCODE_PORT}"
   if [ -n "${PORT_BASE:-}" ]; then
-    printf '  App previews   ->  http://%s:%s-%s\n' "${PREVIEW_HOST}" "${PORT_BASE}" "${PORT_END:-30099}"
+    printf '  App previews   ->  http://%s:%s-%s\n' "${PREVIEW_HOST:-<host>}" "${PORT_BASE}" "${PORT_END:-30099}"
   else
-    printf '  App previews   ->  http://%s:<port>\n' "${PREVIEW_HOST}"
+    printf '  App previews   ->  http://%s:<port>\n' "${PREVIEW_HOST:-<host>}"
   fi
   printf '  ---------------------------------------------------------------\n'
   printf '  projects       ->  %s   (only host path mounted)\n' "$PROJECTS_DIR"

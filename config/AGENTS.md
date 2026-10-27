@@ -37,23 +37,20 @@ directory.
 
 `localhost` is meaningless here. To show something:
 
-1. Bind to `0.0.0.0` — never `127.0.0.1`. Use `PORT=$(freeport)` and pass it in:
+1. Bind `0.0.0.0` — never `127.0.0.1` — on any free port:
 
+       PORT=$(freeport)
        pnpm dev --host 0.0.0.0 --port "$PORT"
 
-   Prefer **30000-30099**: it is the convention, and it is the only range that
-   works when this container is reached through published ports. On its own LAN
-   address, any port works.
+2. Run `preview`. It prints the URL for every listener using `PREVIEW_HOST`
+   (this container's own address or name) and flags anything bound to loopback,
+   which looks fine in here and 404s for the user.
 
-2. Give the user `http://<PREVIEW_HOST>:<PORT>`. Run `preview` — it prints the
-   exact URL for every listener and flags anything bound to loopback, which
-   looks fine in here and 404s for the user.
+   Ports are direct — no reverse proxy — so HMR and websockets behave normally.
+   Do not build demo links from the T3 Code hostname: it forwards only the app
+   port.
 
-   Do not build demo links from the T3 Code hostname: it is fronted by a proxy
-   that forwards only the app port.
-
-Ports 3773 (T3 Code) and 4096 (OpenCode) are taken; never assume 30000 is free.
-Ports are direct — no reverse proxy — so HMR and websockets behave normally.
+3773 and 4096 belong to T3 Code and OpenCode; don't take them.
 
 ## There is no Docker here
 
@@ -221,8 +218,10 @@ several projects simultaneously.
 
 ## Network
 
-Outbound internet works (package installs, API calls). Inbound only arrives on
-30000-30099, 3773, 4096, and (when a key is configured) SSH on 22.
+Outbound internet works (package installs, API calls). Inbound reaches this
+container on every port it binds when it has its own LAN address (ipvlan), or
+only on 30000-30099, 3773 and 4096 when ports are published instead. SSH on 22
+when a key is configured.
 
 **Outbound SSH is blocked at the host firewall.** Do not attempt to reach tcp/22
 or tcp/2222 on the LAN or on the host itself — the connection will be refused.

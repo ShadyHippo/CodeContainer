@@ -45,7 +45,7 @@ services:
       # ---------------------------------------------------------------------
       TZ: "UTC"
       PUBLIC_HOST: "100.x.y.z" # host part of pairing links (T3 Code UI)
-      PREVIEW_HOST: "un.raid" # host part of demo links; a name that reaches the host directly (LAN/mDNS), since a public T3 hostname usually proxies only the app port
+      PREVIEW_HOST: "192.168.1.50" # EDIT ME: this container's own LAN address (ipvlan) or a name for it
       GH_TOKEN: "" # GitHub PAT: used by gh + git's credential helper
       GITHUB_TOKEN: "" # same value; some tools look for this name
 

@@ -21,7 +21,8 @@ Laptop / phone
 │  │                                                                 │  │
 │  │  /root/Projects ◀─ bind ── /mnt/user/Projects        (rw, durable)  │  │
 │  │  /tmp       ◀─ bind ── /mnt/cache/scratch/…      (wiped)        │  │
-│  │  ports 30000-30099 ◀── published ──▶ dev-server previews        │  │
+│  │  own LAN address (ipvlan)  ──▶ dev-server previews, SSH         │  │
+│  │  or ports 30000-30099 ◀── published ──▶ dev-server previews     │  │
 │  └─────────────────────────────────────────────────────────────────┘  │
 └───────────────────────────────────────────────────────────────────────┘
 ```
@@ -72,7 +73,8 @@ the host. Agents stay in that range; `preview` filters to it, and anything bound
 to `127.0.0.1` is flagged because it is unreachable from your machine.
 
 **Its own LAN address (ipvlan/macvlan).** Give the container a static address and
-it behaves like a host: any port, no `ports:` block, no mapping range.
+it behaves like a host: any port, no `ports:` block, no mapping range. This is
+what the full setup uses — SSH on 22, demos on any port, Dolphin over SFTP.
 `compose.ipvlan.yaml` is an overlay for that:
 
 ```bash
@@ -139,9 +141,9 @@ with no button. `rust`/`go` stay on mise because T3 never touches them.
 
 | Port(s)       | What                          | Notes                          |
 | ------------- | ----------------------------- | ------------------------------ |
-| `30000-30099` | app previews                  | the only place dev servers go  |
+| `30000-30099` | app previews                  | published-port mode only; with its own LAN address *any* port works |
 | `3773`        | T3 Code UI                    | pairing token = password       |
-| `4096`        | OpenCode HTTP API             | bonus; T3 uses the CLI         |
+| `4096`        | OpenCode HTTP API             | bonus; T3 uses the CLI; often disabled |
 
 Everything else published is bound to `BIND_IP` — **set it to your Tailscale IP**
 or nothing is reachable from off-host. It defaults to `127.0.0.1`.
@@ -189,7 +191,7 @@ irreplaceable data.
   and `INPUT` (*the host itself*). Compose cannot express this — egress
   filtering is not a Docker feature. This filters *routed* traffic: an
   ipvlan/macvlan container bypasses it entirely (see [Gotchas](#gotchas)).
-- **No inbound except the published range + SSH.** `no-new-privileges: true`.
+- **Inbound is the published range (or every port, on its own LAN address) plus SSH.** `no-new-privileges: true`.
 - **Git over HTTPS only**, authenticated by `GH_TOKEN` via git's credential
   helper. `GH_TOKEN`/`GITHUB_TOKEN` are read from the environment only — there
   is no file or `/secrets` fallback.
@@ -234,7 +236,7 @@ Key settings:
 | scratch bind           | big disk scratch, kept off Docker storage            |
 | `BIND_IP`              | interface to publish on — your Tailscale IP          |
 | `PUBLIC_HOST`          | host part of pairing links (T3 Code UI, port 3773)   |
-| `PREVIEW_HOST`         | host part of demo links, default `un.raid` — must be a name that reaches the host directly, because a public T3 hostname usually proxies only the app port |
+| `PREVIEW_HOST`         | address or name used for demo links. Set it to the container's own LAN address (ipvlan/macvlan) or a name that resolves to it; if unset, `preview` detects the container's default-route address |
 | `GH_TOKEN`             | GitHub PAT for `gh` and git push over HTTPS          |
 | `SCRATCH_WIPE_ON_START`| wipe `/tmp` on start (default `1`)                   |
 | `T3_CHANNEL`           | runtime T3 Code channel override: empty (baked build), `latest` (stable), `nightly`, or a pinned version (e.g. `0.1.0`). Switches without an image rebuild |
@@ -425,10 +427,10 @@ must resolve to the container — not to the NAS host, which also has an sshd.
 none:
 
 ```sshconfig
-Host code.un.raid
-  HostName code.un.raid     # or the container's LAN IP
+Host codecontainer
+  HostName 192.168.0.25     # EDIT: the container's LAN address
   User root
-  Port 2222                 # omit with a dedicated ipvlan address
+  Port 22                   # 2222 if you publish 22 instead
   IdentityFile ~/.ssh/id_ed25519
   IdentitiesOnly yes
 ```
@@ -436,11 +438,12 @@ Host code.un.raid
 Check it before involving T3:
 
 ```bash
-ssh code.un.raid 'hostname; opencode --version'
+ssh codecontainer 'hostname; opencode --version'
 ```
 
-**T3.** Settings → Connections → Add environment → SSH, host `code.un.raid`.
-T3 opens the port forward and the editor handoff then uses that same host.
+**T3.** Settings → Connections → Add environment → SSH, host `codecontainer` (or
+the address). T3 opens the port forward and the editor handoff then uses that
+same host.
 
 To keep your existing paired environment instead, add this name as a *route*
 (**Add route**): pairing the same machine over another address adds a route
@@ -541,8 +544,9 @@ scripts/scratch-sweep.sh   clear scratch while the container is stopped
   T3: it works, it just doesn't survive a rebuild.
 - **`yq` is the Python/jq wrapper**, not mikefarah's Go build: `yq '.key' file`
   works, `yq e '.'` does not.
-- **Ports 30000-30099 must be free** on the host and not inside the Linux
-  ephemeral range (32768-60999) — hence the choice.
+- **Ports 30000-30099 must be free** on the host if you publish them (bridged
+  mode), and must not sit inside the Linux ephemeral range (32768-60999).
+  With an own LAN address there is no range to reserve.
 
 ## License
 

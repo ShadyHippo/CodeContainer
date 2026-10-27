@@ -11,15 +11,19 @@ set -uo pipefail
 BASE="${PORT_BASE:-}"
 END="${PORT_END:-}"
 
-# Demo links use PREVIEW_HOST, not PUBLIC_HOST. The public T3 hostname usually
-# forwards only the app port; this must be the name (or address) that reaches
-# the container itself.
-HOST="${PREVIEW_HOST:-un.raid}"
+# Demo links use PREVIEW_HOST: the address or name that reaches *this container*
+# (its own LAN address in ipvlan mode). PUBLIC_HOST is for the T3 UI and usually
+# forwards only the app port, so it is the wrong host for a demo link.
+HOST="${PREVIEW_HOST:-}"
 HOST_HINT=""
 if [ -z "$HOST" ]; then
-  HOST="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  # Prefer the source address of the default route: with an own LAN address that
+  # is the one a browser on the network can reach. Fall back to the first IP.
+  HOST="$(ip -4 route get 1.1.1.1 2>/dev/null \
+    | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
+  [ -n "$HOST" ] || HOST="$(hostname -I 2>/dev/null | awk '{print $1}')"
   HOST="${HOST:-<host-ip>}"
-  HOST_HINT="  !! guessed container IP - set PREVIEW_HOST for links that work from your browser"
+  HOST_HINT="  !! guessed this container's address - set PREVIEW_HOST to use a name instead"
 fi
 
 in_range() {
