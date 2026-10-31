@@ -161,11 +161,13 @@ or nothing is reachable from off-host. It defaults to `127.0.0.1`.
 | `/root/go`, caches    | volume   | go / npm / cargo / pip caches              |
 
 **The "where am I" trick.** Agents have no idea they're in a remote container
-with no localhost, no Docker, and a port range. `config/AGENTS.md` is baked into
-the image and seeded on startup into every harness's global rules file
+with no localhost and no Docker. `config/AGENTS.md` is baked into the image and
+seeded on startup into every harness's global rules file
 (`~/.config/opencode/AGENTS.md`, `~/.codex/AGENTS.md`, `~/.claude/CLAUDE.md`),
-so every session starts knowing the terrain. It is seeded only if missing, so
-your edits survive.
+so every session starts knowing the terrain. A rebuilt image refreshes it while
+the copy is still ours; a file you edited is left alone from then on. The
+toolchain block inside it is rendered from live state by `bin/tooling`, so it
+never drifts out of date.
 
 ## Security model
 
@@ -466,7 +468,7 @@ Ubuntu 26.04 LTS. Roughly 5.9 GB unpacked.
 | Agents      | T3 Code (stable by default); **OpenCode 2 installs on first boot** (see below); Playwright (Chromium + Firefox) |
 | Remote edit | `openssh-server` for VS Code Remote-SSH and T3 SSH environments — key-only, and it does not start until a public key is present |
 | Languages   | Node 24 (pnpm/yarn/bun/deno), TypeScript, Python 3.14, Ruby, PHP 8.5, Elixir/Erlang, Lua, C/C++ (gcc 15, clang 21) |
-| Via mise    | **Rust and Go** out of the box; any project can pin its own (`mise use java@21`, `.tool-versions`, …) |
+| Via mise    | **Rust, Go and Java** out of the box; any project can pin its own (`mise use go@1.24`, `.tool-versions`, …) |
 | Build tools | make, CMake, Ninja, Meson, autotools, protobuf                        |
 | Databases   | PostgreSQL 18, MariaDB 11, Redis 8, SQLite (run as processes)         |
 | Docs/media  | Pandoc, Typst, TeX Live, ImageMagick, ffmpeg, Graphviz                |
@@ -508,8 +510,9 @@ config/AGENTS.md           the "where you are" rules seeded into every agent
 config/gitconfig           system git defaults (identity, HTTPS cred helper)
 config/{bashrc,zshrc}      shell setup
 bin/preview                list live dev servers as reachable URLs
-bin/freeport               pick a free port in the preview range
+bin/freeport               pick a free port for a dev server
 bin/agent-notes            print the agent rules
+bin/tooling                render the live toolchain into the agent rules
 scripts/preflight.sh       host checks before deploying
 scripts/no-ssh-egress.sh   block container -> tcp/22 (LAN + host)
 scripts/scratch-sweep.sh   clear scratch while the container is stopped
@@ -533,9 +536,10 @@ scripts/scratch-sweep.sh   clear scratch while the container is stopped
   (`~/.local/bin/opencode`) because that is the install shape T3 Code can
   update; `~/.local/bin` is ahead of `/mise/shims` on PATH so a stale shim can
   never shadow it.
-- **`AGENTS.md` is seeded only if missing.** A rebuilt image won't refresh it
-  once the volume exists — `docker compose exec code rm /root/.config/opencode/AGENTS.md`
-  and restart to re-seed.
+- **`AGENTS.md` tracks the image until you edit it.** Rules are re-seeded when
+  a new image ships them, but a copy you edited is never clobbered. To take the
+  image's version back, delete the file and restart. The generated toolchain
+  block is refreshed in place either way.
 - **`t3 update` inside the container is temporary.** T3 self-updates with npm
   into `/usr/local`, which is the image layer — the newer build is live until
   the next rebuild and then silently reverts. Prefer rebuilding, or set

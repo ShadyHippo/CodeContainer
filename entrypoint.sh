@@ -78,20 +78,43 @@ if [ "$#" -gt 0 ]; then
 fi
 
 # --- seed the "where am I" rules into every agent's config --------------------
-# Seeded only when missing, so the user's own edits are never clobbered.
+# Written from the image on first boot, and again when a new image ships updated
+# rules - but only while the copy is still ours. A file the user edited is left
+# alone for good. The generated tooling block is refreshed separately, by
+# `tooling`, so it never counts as an edit.
+rules_hash() {  # hash the rules, ignoring the generated tooling block
+  sed '/<!-- BEGIN:installed-tools -->/,/<!-- END:installed-tools -->/d' "$1" \
+    | sha256sum | cut -d' ' -f1
+}
+
 seed_rules() {
   local src=/etc/codecontainer/AGENTS.md
   [ -f "$src" ] || return 0
-  local dst
+  local stampdir=/root/.config/codecontainer want dst stamp cur
+  want="$(rules_hash "$src")"
+  mkdir -p "$stampdir"
   for dst in \
     "/root/.config/opencode/AGENTS.md" \
     "/root/.codex/AGENTS.md" \
     "/root/.claude/CLAUDE.md"
   do
     mkdir -p "$(dirname "$dst")"
+    stamp="$stampdir/rules-$(printf '%s' "$dst" | tr '/' '-').sha"
     if [ ! -f "$dst" ]; then
       cp "$src" "$dst"
+      printf '%s\n' "$want" > "$stamp"
       echo "[entrypoint] seeded agent rules -> $dst"
+      continue
+    fi
+    cur="$(rules_hash "$dst")"
+    if [ "$cur" = "$want" ]; then
+      printf '%s\n' "$want" > "$stamp"
+      continue
+    fi
+    if [ -f "$stamp" ] && [ "$cur" = "$(cat "$stamp")" ]; then
+      cp "$src" "$dst"
+      printf '%s\n' "$want" > "$stamp"
+      echo "[entrypoint] refreshed agent rules -> $dst"
     fi
   done
 }
@@ -175,43 +198,6 @@ except Exception:
 # still starts with node, Python and the C toolchain from the image - it just
 # won't have rust/go until mise can fetch them. Idempotent: already-installed
 # tools are skipped in well under a second.
-generate_tools_block() {
-  {
-    echo "Image tools: Node 24, TypeScript, Python 3.14, Ruby, PHP 8.5, C/C++, ffmpeg, PostgreSQL 18, MariaDB 11, Redis 8, SQLite, Playwright."
-    echo
-    echo "mise-managed runtimes (mise ls):"
-    mise ls 2>/dev/null || echo "(mise not ready yet)"
-    echo
-    local oc npmout
-    oc="$(opencode --version 2>/dev/null | head -1)"
-    echo "OpenCode: ${oc:-not installed} (npm-global in ~/.local; T3 Code owns updates)"
-    echo
-    npmout="$(npm ls -g --depth=0 2>/dev/null || true)"
-    echo "Global npm packages (npm ls -g --depth=0):"
-    echo "${npmout:-(none)}"
-    echo
-    echo "HandBrake: not preinstalled (install per durable rules if needed)."
-  } > /tmp/installed-tools-block.txt
-}
-
-update_tools_block() {
-  local file="$1"
-  [ -f "$file" ] || return 0
-  python3 - "$file" /tmp/installed-tools-block.txt <<'PY'
-import sys, re
-path, blockpath = sys.argv[1], sys.argv[2]
-text = open(path).read()
-block = open(blockpath).read().rstrip("\n")
-pattern = re.compile(r"<!-- BEGIN:installed-tools -->.*?<!-- END:installed-tools -->", re.S)
-new = "<!-- BEGIN:installed-tools -->\n" + block + "\n<!-- END:installed-tools -->"
-if pattern.search(text):
-    text = pattern.sub(new, text, count=1)
-else:
-    text = text.rstrip() + "\n\n" + new + "\n"
-open(path, "w").write(text)
-PY
-}
-
 prep_mise() {
   command -v mise >/dev/null 2>&1 || return 0
   [ "${MISE_AUTO_INSTALL}" = "1" ] || return 0
@@ -222,15 +208,6 @@ prep_mise() {
     echo "[entrypoint] mise install failed or timed out - image toolchains still available"
     tail -3 /tmp/mise-install.log 2>/dev/null | sed 's/^/[entrypoint]   /'
   fi
-  # Refresh the auto-generated installed-tooling block in agent rules (best effort).
-  generate_tools_block
-  for dst in \
-    "/root/.config/opencode/AGENTS.md" \
-    "/root/.codex/AGENTS.md" \
-    "/root/.claude/CLAUDE.md"
-  do
-    update_tools_block "$dst"
-  done
 }
 
 banner() {
@@ -452,6 +429,21 @@ echo "[entrypoint] exec: $*"
 # Runs in the background: the container must come up whether or not the network
 # is reachable for mise, or T3 is ready to mint a token yet.
 print_pairing &
-prep_mise &
+# Agent toolchain context: render immediately (the seeded rules carry an empty
+# block), render again once mise has settled, then keep it current - agents
+# install things, and a stale list is worse than no list.
+(
+  if command -v tooling >/dev/null 2>&1; then
+    tooling update
+    prep_mise || true
+    tooling update
+    while :; do
+      tooling watch || true
+      sleep 5
+    done
+  else
+    prep_mise || true
+  fi
+) &
 
 exec "$@"

@@ -1,9 +1,8 @@
 # You are inside CodeContainer
 
-A single Ubuntu 26.04 container running on a home NAS (UnRaid), reachable over
-Tailscale. T3 Code drives you (OpenCode) headlessly. There is **no GUI and no
-`localhost` a human can see** — the only way the user sees your work is through
-the published port range below.
+A single Ubuntu 26.04 container on a home NAS (UnRaid), reached over Tailscale.
+T3 Code drives you (OpenCode) headlessly. There is **no GUI and no `localhost`
+a human can see** — you show work by binding a port and handing the user a link.
 
 ## Where things live
 
@@ -35,14 +34,16 @@ directory.
 
 ## Showing the user a running app (most important)
 
-`localhost` is meaningless here. To show something:
+`localhost` is meaningless here. This container has its own LAN address, so
+**any** free port is reachable — there is no port range to stay inside.
 
-1. Bind `0.0.0.0` — never `127.0.0.1` — on any free port:
+1. Bind `0.0.0.0` — never `127.0.0.1`, which is this container's own loopback
+   and 404s for the user:
 
        PORT=$(freeport)
        pnpm dev --host 0.0.0.0 --port "$PORT"
 
-2. Run `preview`. It prints the URL for every listener using `PREVIEW_HOST`
+2. Run `preview`. It prints a URL for every listener using `PREVIEW_HOST`
    (this container's own address or name) and flags anything bound to loopback,
    which looks fine in here and 404s for the user.
 
@@ -50,7 +51,8 @@ directory.
    Do not build demo links from the T3 Code hostname: it forwards only the app
    port.
 
-3773 and 4096 belong to T3 Code and OpenCode; don't take them.
+3773 is T3 Code and 4096 is reserved for the optional OpenCode API; don't take
+them.
 
 ## There is no Docker here
 
@@ -60,7 +62,7 @@ No `docker`, no `docker compose`, no DinD, no socket. If a project ships a
 - Databases: `postgresql`, `mariadb`, and `redis` are installed as normal
   processes (`service postgresql start`, `redis-server --daemonize yes`), or
   just use SQLite.
-- Services: run them as processes against the port range above.
+- Services: run them as processes, like the databases.
 
 ## Releasing services (docker-deploy)
 
@@ -82,7 +84,7 @@ and exposes one audited script per stack:
   `rejected` in `GET /scripts` names scripts that exist but failed their
   permission checks (owner, mode, symlink).
 - Reachable only on the internal Docker network, by that name. There is no
-  public URL and no port published to the LAN.
+  public URL.
 
 ## Long-running work
 
@@ -99,12 +101,12 @@ not your own. Use `buildah`, which builds daemonlessly:
     buildah bud -t myapp:latest .              # run in the project directory
     buildah push myapp:latest ghcr.io/you/myapp:latest
 
-- Storage driver is `vfs` and isolation is `chroot`; both are preconfigured, so
-  plain `buildah bud` works. Do not pass `--storage-driver` or `--isolation`
-  unless you have a reason.
-- `docker`, `docker compose` and `podman` are **not** available. If a project
-  ships a `docker-compose.yml`, you cannot use it — build an image instead, or
-  run the services as processes.
+- Storage is `vfs` (baked into `/etc/containers/storage.conf`, not a choice), so
+  plain `buildah bud` works. If a `RUN` step fails on namespaces, retry with
+  `--isolation chroot`.
+- `docker`, `docker compose` and `podman` are **not** available. Build an image
+  instead of using a project's `docker-compose.yml`, or run the services as
+  processes.
 - Registry credentials persist: `buildah login ghcr.io -u <user>` writes to
   `~/.config/containers/auth.json`, which is on a bind mount.
 
@@ -119,28 +121,21 @@ Anything durable goes in the project under `~/Projects`.
 
 ## Toolchains
 
-**Per-project runtimes come from mise.** `rust` and `go` are installed at boot
-from mise; pin a version per project with a `mise.toml` at the project root:
+**The generated block at the end of this file is the source of truth** for what
+is installed here, at what version, and what is absent. It is rewritten from the
+live container whenever the environment changes — so do not probe for tools
+yourself, and do not trust an older copy of it.
+
+**Per-project runtimes come from mise.** Pin a version per project with a
+`mise.toml` at the project root:
 
     mise use go@1.24        # writes/updates mise.toml
     mise use rust@stable
     mise install            # installs whatever mise.toml pins
 
 **Commit `mise.toml` / `.tool-versions`.** Pinning the toolchain alongside the
-code is the point — don't gitignore them.
-
-**From the image, not mise:** Node 24 (pnpm/yarn/bun/deno), TypeScript, Python
-3.14 (pip/uv/venv), Ruby, PHP 8.5 + Composer, Elixir/Erlang, Lua, C/C++ (gcc 15,
-clang 21), CMake/Ninja/Meson, ffmpeg, ImageMagick, Graphviz, Pandoc, Typst,
-TeX Live, PostgreSQL 18, MariaDB 11, Redis 8, SQLite. (HandBrake is NOT
-preinstalled; install it per the durable rules above if a task needs it.)
-
-**Not installed at all** — add per project when needed:
-`mise use java@21`, `mise use gradle@8`, `mise use maven@3`, `mise use dotnet`.
-
-Language servers are on PATH: rust-analyzer, gopls, typescript-language-server,
-pyright, clangd, lua-language-server, bash/yaml/json/html/css, tailwind,
-dockerfile.
+code is the point — don't gitignore them. Anything the block lists as absent
+arrives that way, or through the durable rules below.
 
 Prefer project-local dependencies (in the project dir, which persists). Globals
 are possible — `~/.local` and `~/go` persist — but keep them rare in a shared
@@ -148,28 +143,29 @@ image.
 
 ## Durable installs (for you, the agent)
 
-The image ships a large toolchain (see below), but anything you add at runtime
-must land in a **persistent** location or it vanishes on rebuild. Prefer:
+Anything you add at runtime must land in a **persistent** location or it vanishes
+on rebuild:
 
-- **Node/JS:** `npm install -g <pkg>` — installs into `~/.local` (bind-mounted),
-  already on `PATH`. Project-local deps go in the project dir.
+- **Node/JS:** `npm install -g <pkg>` — `NPM_CONFIG_PREFIX` is `~/.local`
+  (bind-mounted, already on `PATH`). Project-local deps go in the project dir.
 - **Python:** a venv inside the project (`uv venv && uv pip install ...`).
-  System pip is locked; do not fight it.
+  System pip is **locked** (`PIP_REQUIRE_VIRTUALENV=1`) and refuses bare
+  installs — that is deliberate. Use `uv run` / `uvx` for throwaway tooling.
 - **Rust/Go/Java/.NET:** `mise use ...` — pins into `/mise` (bind-mounted).
 - **Other binaries:** download/extract into `~/.local/bin` or the project dir
-  (both on `PATH` / durable).
+  (both durable and on `PATH`).
 - **`apt-get install`:** works and is fine for "right now", but lands in the
-  container layer and is **not durable**. Use sparingly; prefer the routes
-  above. `handbrake-cli` is not preinstalled but can be added this way (or as
-  a static build in `~/.local/bin`) for transcoding/Jellyfin-style workflows —
-  `ffmpeg` is already in the image.
+  container layer and is **not durable**. Prefer the routes above.
 
-You are root; `apt-get` never prompts. Outbound network works for installs.
+You are root: `sudo` is not installed and not needed, and `apt-get` never
+prompts.
 
-## Installed tooling (auto-generated at boot)
+## Installed tooling (generated from live state)
+
+Agents never query this: the block is rendered by `tooling` at boot, and again
+within seconds of anything being installed, into every agent rules file.
 
 <!-- BEGIN:installed-tools -->
-Run `mise ls` and `npm ls -g --depth=0` to see currently installed tools.
 <!-- END:installed-tools -->
 
 ## Browsers
@@ -179,33 +175,17 @@ Playwright with Chromium and Firefox is preinstalled
 for screenshots and E2E tests. If a project pins a different Playwright
 version, run `npx playwright install chromium` inside that project once.
 
-## Python: always a venv, never system pip
-
-The system Python is **locked** (`PIP_REQUIRE_VIRTUALENV=1`) — a bare
-`pip install` will refuse. That is deliberate. Use a project-local venv:
-
-    uv venv && uv pip install <pkg>     # fastest, preferred
-    python3 -m venv .venv && . .venv/bin/activate && pip install <pkg>
-
-Create the venv inside the project so it persists. Use `uv` for throwaway
-tooling (`uv run`, `uvx`).
-
-## You are root
-
-Do not use `sudo` — it is not installed and it is not needed. You are already
-UID 0 inside this container. `apt-get install` works directly (it never
-prompts).
-
 ## Git — HTTPS only, no SSH
 
 An sshd runs inside this container for inbound Remote-SSH, but **outbound** SSH
-is not a way out: the host firewall blocks it. Use HTTPS URLs:
+is not a way out: the host firewall blocks it, so tcp/22 and tcp/2222 on the LAN
+or on the host will refuse. Use HTTPS URLs:
 `https://github.com/owner/repo.git`, never `git@github.com:...`.
 
 Authentication comes from a GitHub token in `GH_TOKEN`, an **environment
 variable supplied by compose**. It is not read from a file, from `/secrets`, or
 from anywhere else — do not look for one. If `GH_TOKEN` is unset, run
-`gh auth login` once — the credential is stored in a persistent volume.
+`gh auth login` once — the credential is stored in `~/.config`, which persists.
 
 Never commit secrets, tokens, or `.env` files.
 
@@ -218,12 +198,8 @@ several projects simultaneously.
 
 ## Network
 
-Outbound internet works (package installs, API calls). Inbound reaches this
-container on every port it binds when it has its own LAN address (ipvlan), or
-only on 30000-30099, 3773 and 4096 when ports are published instead. SSH on 22
-when a key is configured.
-
-**Outbound SSH is blocked at the host firewall.** Do not attempt to reach tcp/22
-or tcp/2222 on the LAN or on the host itself — the connection will be refused.
-Nothing on this network wants an SSH connection from you. Inbound sshd exists
-only so the user's editor can attach; it is not a route to anywhere else.
+Inbound reaches this container on every port it binds, on the LAN and over
+Tailscale; SSH on 22 when a key is configured. Outbound internet works for
+installs and APIs. Outbound SSH is blocked — nothing on this network wants an
+SSH connection from you, and inbound sshd exists only so the user's editor can
+attach.

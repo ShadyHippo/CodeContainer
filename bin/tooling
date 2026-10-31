@@ -1,0 +1,241 @@
+#!/usr/bin/env bash
+# tooling - render what is actually installed into the agent rules file.
+#
+# Agents must never probe the toolchain themselves and never trust a list that
+# has drifted: the "installed tools" block in AGENTS.md is generated from live
+# state here - at boot, and again whenever the environment changes.
+#
+#   tooling print    render the block to stdout
+#   tooling update   splice it into every agent rules file (only if it changed)
+#   tooling watch    do that continuously, re-probing only when something moved
+set -uo pipefail
+
+RULES_FILES=(
+  /root/.config/opencode/AGENTS.md
+  /root/.codex/AGENTS.md
+  /root/.claude/CLAUDE.md
+)
+
+# Re-probe at most this often when nothing looks like it changed (seconds).
+HEARTBEAT="${TOOLING_HEARTBEAT:-600}"
+# How often the watch loop stats the install roots (seconds).
+INTERVAL="${TOOLING_INTERVAL:-15}"
+
+# Tools that ship in the image or arrive through mise/npm. name|version args.
+PROBED=(
+  "node|--version"
+  "npm|--version"
+  "pnpm|--version"
+  "yarn|--version"
+  "bun|--version"
+  "deno|--version"
+  "tsc|--version"
+  "python3|--version"
+  "uv|--version"
+  "ruby|--version"
+  "php|--version"
+  "composer|--version"
+  "elixir|--version|^Elixir"
+  "lua|-v"
+  "gcc|--version"
+  "clang|--version"
+  "cmake|--version"
+  "ninja|--version"
+  "meson|--version"
+  "make|--version"
+  "ffmpeg|-version"
+  "magick|--version"
+  "dot|-V"
+  "pandoc|--version"
+  "typst|--version"
+  "pdflatex|--version"
+  "psql|--version"
+  "mariadb|--version"
+  "redis-server|--version"
+  "sqlite3|--version"
+  "git|--version"
+  "gh|--version"
+  "jq|--version"
+  "rg|--version"
+  "tmux|-V"
+  "blender|--version"
+)
+
+# Present-but-optional / expected-absent: reported either way, so an agent never
+# has to guess whether a stack can be installed with `mise use`.
+CHECKED=(gradle mvn dotnet handbrake)
+
+# Language servers are on PATH, version numbers of little interest.
+LSPS=(
+  rust-analyzer
+  gopls
+  typescript-language-server
+  pyright
+  clangd
+  lua-language-server
+  bash-language-server
+  yaml-language-server
+  vscode-json-language-server
+  vscode-html-language-server
+  vscode-css-language-server
+  tailwindcss-language-server
+  docker-langserver
+)
+
+key() {  # block identity, ignoring the "generated at" stamp
+  printf '%s' "$1" | sed '1s/generated [^ ]* from/generated from/'
+}
+
+emit() {  # wrapped continuation lines, one blank line after each section
+  printf '%s\n' "$1" | fold -s -w 96 | sed '2,$s/^/  /'
+  echo
+}
+
+version_of() {  # first x.y[.z...] token of the first matching output line
+  local out filter="${FILTER:-.}"
+  # Read to the end before filtering: closing the pipe early sends SIGPIPE, and
+  # a VM that dies mid-banner (elixir, erl) drops a crash dump in the cwd.
+  out="$(timeout 5 "$@" 2>&1)" || true
+  [ -n "$out" ] || return 0
+  printf '%s\n' "$out" | grep -E "$filter" | head -n1 | grep -oE '[0-9]+(\.[0-9]+)+' | head -n1
+}
+
+render() {
+  local present="" missing="" name args ver filter
+  for spec in "${PROBED[@]}"; do
+    name="${spec%%|*}"; args="${spec#*|}"; filter="${args#*|}"
+    [ "$filter" = "$args" ] && filter="." || args="${args%%|*}"
+    if ! command -v "$name" >/dev/null 2>&1; then
+      missing+="$name, "
+      continue
+    fi
+    # shellcheck disable=SC2086  # args are deliberately word-split
+    ver="$(FILTER="$filter" version_of "$name" $args)"
+    present+="$name${ver:+ $ver}, "
+  done
+
+  local optional="" absent
+  for name in "${CHECKED[@]}"; do
+    if command -v "$name" >/dev/null 2>&1; then
+      # shellcheck disable=SC2086
+      ver="$(version_of "$name" --version)"
+      optional+="$name${ver:+ $ver}, "
+    else
+      missing+="$name, "
+    fi
+  done
+  absent="${missing%, }"
+
+  local mise_line=""
+  if command -v mise >/dev/null 2>&1; then
+    mise_line="$(mise ls 2>/dev/null | awk 'NF{printf "%s %s, ", $1, $2}' | sed 's/, $//')"
+  fi
+
+  local lsp_line=""
+  for name in "${LSPS[@]}"; do
+    command -v "$name" >/dev/null 2>&1 && lsp_line+="$name, "
+  done
+  lsp_line="${lsp_line%, }"
+
+  local npm_line=""
+  if command -v npm >/dev/null 2>&1; then
+    npm_line="$(npm ls -g --depth=0 2>/dev/null | tail -n +2 | grep -v '^[[:space:]]*$' \
+      | sed -e 's/^[^A-Za-z@]*//' -e 's/ deduped$//' | paste -sd, - | sed 's/,/, /g')"
+  fi
+
+  local browser_line=""
+  [ -d /ms-playwright ] && browser_line="$(ls /ms-playwright 2>/dev/null \
+    | sed 's/-[0-9]*$//' | grep -viE '^(ffmpeg|chrome-headless)' | sort -u \
+    | paste -sd, - | sed 's/,/, /g')"
+
+  emit "installed tools, generated $(date -u +%Y-%m-%dT%H:%MZ) from this container.
+Trust this over any other list of what exists here - do not probe by hand."
+  emit "${present%, }"
+  [ -n "$optional" ] && emit "also present: ${optional%, }"
+  [ -n "$mise_line" ] && emit "mise-managed runtimes: $mise_line"
+  [ -n "$lsp_line" ] && emit "language servers: $lsp_line"
+  [ -n "$npm_line" ] && emit "global npm packages: $npm_line"
+  [ -n "$browser_line" ] && emit "playwright browsers: $browser_line"
+  [ -n "$absent" ] && emit "not installed: $absent"
+  return 0
+}
+
+splice() {  # splice the block into the given rules files, only where it differs
+  local block="$1"; shift
+  BLOCK="$block" python3 - "$@" <<'PY'
+import os, re, stat, sys
+
+block = os.environ["BLOCK"].rstrip("\n")
+pattern = re.compile(r"<!-- BEGIN:installed-tools -->.*?<!-- END:installed-tools -->", re.S)
+stamp = re.compile(r"generated \S+ from")
+
+
+def same(old, new):
+    """Ignore the timestamp: identical content must not rewrite (or wake agents)."""
+    return stamp.sub("generated from", old) == stamp.sub("generated from", new)
+new = "<!-- BEGIN:installed-tools -->\n" + block + "\n<!-- END:installed-tools -->"
+
+for path in sys.argv[1:]:
+    try:
+        text = open(path).read()
+    except OSError:
+        continue  # that agent runtime is not configured in this container
+    if pattern.search(text):
+        if same(pattern.search(text).group(0), new):
+            continue  # identical: do not touch the file, do not wake agents
+        text = pattern.sub(lambda _: new, text, count=1)
+    else:
+        text = text.rstrip() + "\n\n" + new + "\n"
+    tmp = path + ".tooling.tmp"
+    with open(tmp, "w") as fh:
+        fh.write(text)
+    os.chmod(tmp, stat.S_IMODE(os.stat(path).st_mode))
+    os.replace(tmp, path)
+    print(path)
+PY
+}
+
+signature() {  # cheap "did anything get installed" probe: install-root mtimes
+  { stat -c '%n %Y' /root/.local/bin /root/.local/lib /root/.local/share \
+      /mise /mise/installs /root/.config/mise /usr/local/bin 2>/dev/null
+    stat -c '%y' /root/.config/mise/config.toml /etc/mise/config.toml 2>/dev/null
+  } | md5sum | cut -d' ' -f1
+}
+
+update_now() {
+  local block changed
+  block="$(render)"
+  changed="$(splice "$block" "${RULES_FILES[@]}")"
+  [ -n "$changed" ] && echo "[tooling] refreshed: $(echo "$changed" | xargs -n1 basename | paste -sd' ' -)"
+  return 0
+}
+
+case "${1:-print}" in
+  print)
+    render
+    ;;
+  update)
+    update_now
+    ;;
+  watch)
+    sig=""; last=""; probed=0
+    while :; do
+      now=$SECONDS
+      cur="$(signature)"
+      if [ "$cur" != "$sig" ] || [ $((now - probed)) -ge "$HEARTBEAT" ]; then
+        sig="$cur"; probed=$now
+        block="$(render)"
+        if [ "$(key "$block")" != "$last" ]; then
+          last="$(key "$block")"
+          changed="$(splice "$block" "${RULES_FILES[@]}")"
+          [ -n "$changed" ] && echo "[tooling] $(date -u +%FT%TZ) refreshed: $(echo "$changed" | xargs -n1 basename | paste -sd' ' -)"
+        fi
+      fi
+      sleep "$INTERVAL"
+    done
+    ;;
+  *)
+    echo "usage: tooling [print|update|watch]" >&2
+    exit 2
+    ;;
+esac
