@@ -160,6 +160,34 @@ on rebuild:
 You are root: `sudo` is not installed and not needed, and `apt-get` never
 prompts.
 
+## Installing packages (supply chain)
+
+`npm install` runs whatever code a package ships in `preinstall` / `install` /
+`postinstall` — transitively, as **root**, with `GH_TOKEN` in the environment.
+That is the most likely way this container gets compromised; it is far more
+likely than a browser CVE and no toolchain version saves you from it.
+
+Lifecycle scripts are **denied by default** here (`ignore-scripts=true` in
+`~/.npmrc`). Do not "fix" a missing native binary by turning that off globally.
+Escalate narrowly instead:
+
+- One package: `npm rebuild <pkg> --ignore-scripts=false`
+- A project that genuinely needs builds: commit `.npmrc` in the project with
+  `ignore-scripts=false`, and say why in its README. Project config beats the
+  user config, so the blast radius stays in that repo.
+- A global CLI: `npm install -g --ignore-scripts=false --allow-scripts=<pkg> <tool>`
+
+`pnpm` (only-built dependencies) and `bun` (`trustedDependencies`) already
+refuse dependency scripts unless named — prefer them for new projects. `deno`
+never runs them. `yarn` (classic) does not protect you at all.
+
+Prefer `npm ci` against a committed lockfile over `npm install`; `npx <pkg>` and
+`pnpm dlx <pkg>` fetch and execute code with no lockfile at all, so use them
+only for packages already in the project. Before adding an unfamiliar
+dependency, look at how old it is — `npm view <pkg> time.modified`, `npm view
+<pkg> time.created` — because a release published hours ago is the classic
+account-hijack window. New packages are cheap to add and expensive to remove.
+
 ## Installed tooling (generated from live state)
 
 Agents never query this: the block is rendered by `tooling` at boot, and again

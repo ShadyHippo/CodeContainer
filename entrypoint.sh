@@ -120,6 +120,24 @@ seed_rules() {
 }
 seed_rules
 
+# --- npm: deny lifecycle scripts by default -----------------------------------
+# `npm install` runs package-controlled code (preinstall/install/postinstall) as
+# root, transitively, with GH_TOKEN in the environment. That is the realistic
+# compromise path in this container - far more likely than a browser bug.
+#
+# Written to ~/.npmrc rather than ENV on purpose: environment config outranks a
+# project's .npmrc, and a project must be able to opt back in deliberately.
+# ~/.npmrc is not a bind mount, so it is re-created on every boot.
+write_npmrc() {
+  cat > "$HOME/.npmrc" <<'EOF'
+# Written by the CodeContainer entrypoint - see config/AGENTS.md.
+ignore-scripts=true
+save-exact=true
+fund=false
+EOF
+}
+write_npmrc
+
 # --- pairing link -------------------------------------------------------------
 # T3's own startup URL contains the CONTAINER's address, which nothing outside
 # the host can reach, and its token dies 5 minutes after boot.
@@ -283,11 +301,13 @@ ensure_opencode() {
   local spec="${OPENCODE_PACKAGE}@${OPENCODE_CHANNEL:-latest}"
   if ! timeout "${OPENCODE_INSTALL_TIMEOUT:-300}" \
     npm install -g --prefix "${OPENCODE_PREFIX}" \
-      --allow-scripts="${OPENCODE_PACKAGE}" "$spec" >"$log" 2>&1; then
+      --ignore-scripts=false --allow-scripts="${OPENCODE_PACKAGE}" \
+      "$spec" >"$log" 2>&1; then
     # Older npm builds reject --allow-scripts; they run lifecycle scripts anyway.
     echo "[entrypoint] npm rejected --allow-scripts, retrying without it"
     if ! timeout "${OPENCODE_INSTALL_TIMEOUT:-300}" \
-      npm install -g --prefix "${OPENCODE_PREFIX}" "$spec" >>"$log" 2>&1; then
+      npm install -g --prefix "${OPENCODE_PREFIX}" \
+        --ignore-scripts=false "$spec" >>"$log" 2>&1; then
       echo "[entrypoint] !! opencode install failed - T3 will show it as unavailable"
       tail -3 "$log" 2>/dev/null | sed 's/^/[entrypoint]   /'
       return 0
