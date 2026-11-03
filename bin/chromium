@@ -1,0 +1,41 @@
+#!/bin/sh
+# chromium - run the Playwright Chromium as the unprivileged `browser` user.
+#
+# Everything else in this container is root, and root cannot use Chromium's
+# sandbox at all (Chromium refuses to start sandboxed as root). The usual answer
+# is `--no-sandbox`, which silently turns any renderer bug into root with
+# GH_TOKEN, ~/Projects and ~/.t3code in reach.
+#
+# Running as `browser` fixes that: a compromised renderer lands as an
+# unprivileged uid that cannot read root's environment or the projects share,
+# and the namespace sandbox works again (Docker runs this container with
+# seccomp=unconfined, so unprivileged user namespaces are available).
+#
+#   chromium --headless --screenshot=/tmp/x.png https://example.com
+#
+# Writes must go somewhere `browser` can write - /tmp is the reliable choice;
+# copy the result out afterwards. Set CHROMIUM_NO_SANDBOX=1 to fall back to
+# --no-sandbox if the namespace sandbox is unavailable.
+set -eu
+
+CHROME="$(ls -1d /ms-playwright/chromium-*/chrome-linux64/chrome 2>/dev/null | sort -V | tail -n1)"
+if [ -z "$CHROME" ]; then
+  echo "chromium: no Playwright Chromium under /ms-playwright" >&2
+  exit 1
+fi
+
+BROWSER_USER="${BROWSER_USER:-browser}"
+BROWSER_HOME="/home/${BROWSER_USER}"
+
+# A stale home from an older image (or a hand-made user) can be owned by root.
+install -d -m 0700 -o "$BROWSER_USER" -g "$BROWSER_USER" \
+  "$BROWSER_HOME" "$BROWSER_HOME/.cache" "$BROWSER_HOME/.config" 2>/dev/null || true
+
+NOSANDBOX=""
+[ "${CHROMIUM_NO_SANDBOX:-0}" = "1" ] && NOSANDBOX="--no-sandbox"
+
+exec setpriv --reuid="$BROWSER_USER" --regid="$BROWSER_USER" --init-groups \
+  env HOME="$BROWSER_HOME" \
+      XDG_CONFIG_HOME="$BROWSER_HOME/.config" \
+      XDG_CACHE_HOME="$BROWSER_HOME/.cache" \
+  "$CHROME" --disable-dev-shm-usage ${NOSANDBOX} "$@"

@@ -165,6 +165,15 @@ services:
       # Drop this line if you do not need `buildah`.
       - seccomp=unconfined
 
+    # Raw sockets are a LAN weapon: with NET_RAW a compromised process can sniff
+    # and ARP-spoof the segment it sits on, which in ipvlan/host mode is your
+    # whole network. Docker grants it by default and nothing here needs it.
+    # Cost: `ping` and `tcpdump` stop working (both want raw sockets as root).
+    # MKNOD and SETPCAP are also droppable, but buildah is sensitive to them -
+    # test a real `buildah bud` before adding them.
+    cap_drop:
+      - NET_RAW
+
     logging:
       driver: json-file
       options:

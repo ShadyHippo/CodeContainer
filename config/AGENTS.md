@@ -199,9 +199,21 @@ within seconds of anything being installed, into every agent rules file.
 ## Browsers
 
 Playwright with Chromium and Firefox is preinstalled
-(`PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`) and launches fine as root. Use it
-for screenshots and E2E tests. If a project pins a different Playwright
-version, run `npx playwright install chromium` inside that project once.
+(`PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`). Drive Chromium through the
+`chromium` wrapper on `PATH`, not the binary in `/ms-playwright` directly: the
+wrapper runs it as the unprivileged `browser` user, which keeps the renderer
+sandbox on and means a browser compromise cannot read `GH_TOKEN`, `~/Projects`
+or `~/.t3code`. The tradeoff is that it cannot write where root can, so point
+screenshots at `/tmp` and copy them into place:
+
+    chromium --headless --screenshot=/tmp/shot.png https://example.com
+
+`CHROMIUM_NO_SANDBOX=1` falls back to `--no-sandbox` when the namespace sandbox
+is unavailable. Playwright launched from Node still runs as root — for a page
+you do not trust, use the wrapper instead of a Playwright script.
+
+If a project pins a different Playwright version, run
+`npx playwright install chromium` inside that project once.
 
 ## Git — HTTPS only, no SSH
 
@@ -216,6 +228,10 @@ from anywhere else — do not look for one. If `GH_TOKEN` is unset, run
 `gh auth login` once — the credential is stored in `~/.config`, which persists.
 
 Never commit secrets, tokens, or `.env` files.
+
+`/secrets` holds **public keys only** (sshd's `authorized_keys`). It is mounted
+read-only, and the entrypoint reports anything else it finds there on boot — a
+token on a host share is readable by everything that can see the share.
 
 ## Working alongside other agents
 

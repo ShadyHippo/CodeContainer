@@ -138,6 +138,31 @@ EOF
 }
 write_npmrc
 
+# --- /secrets: public keys only ----------------------------------------------
+# The mount is read-only and the only thing read from it is authorized_keys.
+# Anything else in there is a surprise, and a token left on a host share is
+# readable (sometimes writable) by everything that can see the share. Report it
+# loudly rather than letting it sit there forever.
+check_secrets() {
+  local dir=/secrets f base
+  [ -d "$dir" ] || return 0
+  for f in "$dir"/*; do
+    [ -e "$f" ] || continue
+    base="$(basename "$f")"
+    case "$base" in
+      authorized_keys|name) continue ;;
+    esac
+    echo "[entrypoint] !! unexpected file in /secrets: ${base} (mode $(stat -c %a "$f" 2>/dev/null))"
+    echo "[entrypoint]    /secrets is for ssh public keys only - delete it on the host"
+  done
+}
+check_secrets
+
+# --- scratch: sticky, so one agent cannot clobber another's files ------------
+# /tmp is a host bind mount, so its mode comes from the host. 1777 is what /tmp
+# must be; without the sticky bit any process can replace another's file.
+chmod 1777 "${SCRATCH_DIR:-/tmp}" 2>/dev/null || true
+
 # --- pairing link -------------------------------------------------------------
 # T3's own startup URL contains the CONTAINER's address, which nothing outside
 # the host can reach, and its token dies 5 minutes after boot.

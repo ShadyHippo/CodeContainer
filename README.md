@@ -187,13 +187,20 @@ irreplaceable data.
   container. The entrypoint starts sshd only when a public key exists in
   `/secrets/authorized_keys` (or `SSH_AUTHORIZED_KEYS`); passwords and
   keyboard-interactive auth are disabled and root is `prohibit-password`.
-  Dropbear stays pinned out.
+  Dropbear stays pinned out. `/secrets` is for **public keys only**: it is
+  mounted read-only, nothing reads anything else from it, and the entrypoint
+  reports any other file it finds there on boot.
+- **The browser is not root.** Chromium runs as the unprivileged `browser` user
+  through the `chromium` wrapper, so it keeps its renderer sandbox (root cannot
+  sandbox at all) and a compromised renderer cannot read `GH_TOKEN`,
+  `~/Projects` or `~/.t3code`. Playwright launched directly from Node still
+  runs as root; use the wrapper for anything you do not trust.
 - **SSH egress blocked at the host.** `scripts/no-ssh-egress.sh` REJECTs
   container → tcp/22 and tcp/2222 in both `DOCKER-USER` (*other* LAN machines)
   and `INPUT` (*the host itself*). Compose cannot express this — egress
   filtering is not a Docker feature. This filters *routed* traffic: an
   ipvlan/macvlan container bypasses it entirely (see [Gotchas](#gotchas)).
-- **Inbound is the published range (or every port, on its own LAN address) plus SSH.** `no-new-privileges: true`.
+- **Inbound is the published range (or every port, on its own LAN address) plus SSH.** `no-new-privileges: true`, and `NET_RAW` is dropped: raw sockets would let a compromised process sniff and ARP-spoof the segment, which in ipvlan/host mode is the whole LAN. The cost is that `ping` and `tcpdump` no longer work.
 - **Git over HTTPS only**, authenticated by `GH_TOKEN` via git's credential
   helper. `GH_TOKEN`/`GITHUB_TOKEN` are read from the environment only — there
   is no file or `/secrets` fallback.

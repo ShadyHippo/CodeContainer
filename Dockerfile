@@ -292,13 +292,34 @@ COPY bin/agent-notes /usr/local/bin/agent-notes
 COPY bin/freeport /usr/local/bin/freeport
 COPY bin/tooling /usr/local/bin/tooling
 COPY bin/pair /usr/local/bin/pair
+COPY bin/chromium /usr/local/bin/chromium
 
 RUN set -eux; \
-    chmod 0755 /usr/local/bin/preview /usr/local/bin/agent-notes /usr/local/bin/freeport /usr/local/bin/tooling /usr/local/bin/pair; \
+    chmod 0755 /usr/local/bin/preview /usr/local/bin/agent-notes /usr/local/bin/freeport /usr/local/bin/tooling /usr/local/bin/pair /usr/local/bin/chromium; \
     printf '\n[ -f /etc/bash.bashrc.d-codecontainer ] && . /etc/bash.bashrc.d-codecontainer\n' >> /etc/bash.bashrc; \
     printf '\n[ -f /etc/zsh/zshrc.d-codecontainer ] && . /etc/zsh/zshrc.d-codecontainer\n' >> /etc/zsh/zshrc; \
     mkdir -p /root/Projects; \
     git --version
+
+# =============================================================================
+# 10b. Unprivileged browser user
+#
+# The container runs as root, and root cannot use Chromium's sandbox at all:
+# Chromium refuses to start sandboxed as root, which is why the usual wrapper
+# passes --no-sandbox and every renderer bug becomes root. A dedicated uid gets
+# the namespace sandbox back and keeps a compromise away from GH_TOKEN,
+# ~/Projects and ~/.t3code.
+# =============================================================================
+ARG BROWSER_UID=1001
+RUN set -eux; \
+    getent group browser >/dev/null || groupadd --system browser; \
+    getent passwd browser >/dev/null || useradd --system --uid "${BROWSER_UID}" \
+      --gid browser --home-dir /home/browser --create-home \
+      --shell /usr/sbin/nologin browser; \
+    install -d -m 0700 -o browser -g browser \
+      /home/browser/.cache /home/browser/.config; \
+    id browser; \
+    setpriv --version
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod 0755 /usr/local/bin/entrypoint.sh
