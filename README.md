@@ -354,6 +354,39 @@ A run with no new image is a no-op, because compose compares image IDs and only
 recreates what changed. `codecontainer` recreates this container, so it ends the
 session that asked for it — call it last.
 
+### Shipping a change: the `full-send` skill
+
+Agents get a `full-send` skill that does the whole loop — verify, commit, push,
+build, push the image, deploy — and settles the thread on success. It is seeded
+into `~/.config/opencode/skills`, `~/.codex/skills`, `~/.claude/skills` and
+`~/.agents/skills` from `config/skills/`.
+
+The work is split so the deterministic half is testable:
+
+```bash
+ship                # build + push :latest and :<sha>, deploy after 120s
+ship --no-deploy    # build and push only
+ship --dry-run      # show the plan
+ship --status       # read the last deploy; non-zero on a mismatch
+```
+
+`ship` refuses to run unless the worktree is clean and HEAD is already on
+origin, because the image has to correspond to a real commit.
+
+**The deploy is delayed and the verification is deferred, on purpose.** The
+sidecar recreates this container, which kills the session, so nothing inside
+the old container can watch the new one start. Instead:
+
+- `ship` bakes the commit into the image (`--build-arg GIT_SHA`) and writes
+  `~/.config/codecontainer/pending-deploy`;
+- the entrypoint compares that marker with the commit baked into the running
+  image on the next boot and appends `verified sha=…` or
+  `MISMATCH expected=… running=…` to `~/.config/codecontainer/deploy.log`;
+- `ship --status` (or `make ship-status`) reads that log.
+
+The banner prints the running image commit, so "did the release land?" is also
+answerable at a glance.
+
 ## Pairing a device
 
 **The container prints a ready-to-use link on every start.** It's in the logs:

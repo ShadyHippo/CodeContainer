@@ -2,7 +2,7 @@ COMPOSE ?= docker compose
 IMAGE   ?= ghcr.io/shadyhippo/codecontainer:latest
 
 .PHONY: help init preflight secrets build up down restart logs shell preview notes pair \
-        egress-apply egress-remove egress-status scratch-sweep size pull push clean
+        egress-apply egress-remove egress-status scratch-sweep size pull push clean ship ship-status
 
 help: ## show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n",$$1,$$2}'
@@ -74,6 +74,12 @@ pull: ## pull the prebuilt image
 
 push: ## push the image
 	docker push $(IMAGE)
+
+ship: ## build, push and deploy this commit (runs inside the container)
+	$(COMPOSE) exec -T code ship
+
+ship-status: ## report the last deploy (non-zero on a mismatch)
+	$(COMPOSE) exec -T code ship --status
 
 clean: ## remove local image
 	docker rmi $(IMAGE) || true

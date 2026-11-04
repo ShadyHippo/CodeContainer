@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+# ship - build, push and deploy this container in one go.
+#
+# The deploy half is deliberately delayed: DockerDeploy recreates THIS
+# container, which kills the session that asked for it. The delay lets the
+# agent finish its turn and lets the thread settle first.
+#
+# The verification half happens on the next boot, because nothing inside the
+# old container survives to watch the new one come up. This script bakes the
+# commit into the image (build arg GIT_SHA) and leaves a marker; the entrypoint
+# compares the two and appends the result to the deploy log. `ship --status`
+# reads that log.
+set -euo pipefail
+
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+IMAGE="${IMAGE:-ghcr.io/shadyhippo/codecontainer}"
+DEPLOY_NAME="${DEPLOY_NAME:-codecontainer}"
+DEPLOY_URL="${DEPLOY_URL:-http://docker-deploy:9000}"
+DELAY="${DELAY:-120}"
+STATE_DIR="${STATE_DIR:-/root/.config/codecontainer}"
+COMMIT_FILE="${COMMIT_FILE:-/etc/codecontainer/commit}"
+
+DEPLOY_LOG="${STATE_DIR}/deploy.log"
+PENDING="${STATE_DIR}/pending-deploy"
+BUILD_LOG="${STATE_DIR}/build.log"
+
+usage() {
+  cat <<'EOF'
+ship - verify, build, push and deploy this container
+
+  ship                 build + push :latest and :<sha>, then deploy after a delay
+  ship --no-deploy     build + push only
+  ship --dry-run       print what would happen, touch nothing
+  ship --status        report the last deploy (and exit 1 on a mismatch)
+  ship --delay N       seconds to wait before deploying (default 120)
+
+Environment: IMAGE, DEPLOY_NAME, DEPLOY_URL, DELAY, STATE_DIR
+EOF
+}
+
+die() { printf 'ship: %s\n' "$*" >&2; exit 1; }
+
+# --- --status ----------------------------------------------------------------
+status() {
+  local running
+  running="$(cat "$COMMIT_FILE" 2>/dev/null || echo unknown)"
+  printf 'running image commit : %s\n' "$running"
+  if [ -f "$PENDING" ]; then
+    printf 'deploy pending       : %s\n' "$(tr '\n' ' ' < "$PENDING")"
+  else
+    printf 'deploy pending       : no\n'
+  fi
+  [ -f "$DEPLOY_LOG" ] || { printf 'deploy log           : (none yet)\n'; return 0; }
+
+  local last
+  last="$(awk '/^requested_start /{buf=""} {buf=buf $0 "\n"} END{printf "%s", buf}' "$DEPLOY_LOG")"
+  last="${last%$'\n'}"
+  printf 'last deploy:\n'
+  printf '%s\n' "$last" | sed 's/^/  /'
+
+  if printf '%s' "$last" | grep -q '^MISMATCH '; then
+    return 1
+  fi
+  return 0
+}
+
+# --- argument parsing --------------------------------------------------------
+mode=ship
+do_deploy=1
+dry_run=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --status) mode=status ;;
+    --no-deploy) do_deploy=0 ;;
+    --dry-run) dry_run=1 ;;
+    --delay)
+      [ "$#" -ge 2 ] || die "--delay needs a number of seconds"
+      DELAY="$2"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; die "unknown argument: $1" ;;
+  esac
+  shift
+done
+
+[ "$mode" = status ] && { status; exit $?; }
+
+mkdir -p "$STATE_DIR"
+
+# --- preconditions -----------------------------------------------------------
+cd "$REPO_DIR"
+git rev-parse --git-dir >/dev/null 2>&1 || die "$REPO_DIR is not a git repository"
+
+dirty="$(git status --porcelain)"
+if [ -n "$dirty" ]; then
+  printf 'ship: the worktree is not clean, so the image would not match a commit:\n' >&2
+  printf '%s\n' "$dirty" | sed 's/^/  /' >&2
+  exit 1
+fi
+
+sha="$(git rev-parse HEAD)"
+branch="$(git rev-parse --abbrev-ref HEAD)"
+[ "$branch" = HEAD ] && die "detached HEAD - check out a branch before shipping"
+
+remote_sha="$(git ls-remote origin "refs/heads/${branch}" 2>/dev/null | awk 'NR==1{print $1}')"
+[ -n "$remote_sha" ] || die "origin has no branch '${branch}' - push it first"
+[ "$remote_sha" = "$sha" ] || die "HEAD (${sha:0:12}) is not pushed to origin/${branch} (${remote_sha:0:12})"
+
+scripts_json="$(curl -fsS --max-time 5 "${DEPLOY_URL}/scripts" 2>/dev/null)" \
+  || die "cannot reach ${DEPLOY_URL} - is docker-deploy up and on this network?"
+printf '%s' "$scripts_json" | grep -q "\"${DEPLOY_NAME}\"" \
+  || die "docker-deploy does not offer '${DEPLOY_NAME}': ${scripts_json}"
+
+printf 'ship: commit %s on %s\n' "$sha" "$branch"
+printf 'ship: image  %s:latest and :%s\n' "$IMAGE" "${sha:0:12}"
+
+if [ "$dry_run" = 1 ]; then
+  printf 'ship: dry run - would build, push'
+  [ "$do_deploy" = 1 ] && printf ', then POST %s/run/%s after %ss' "$DEPLOY_URL" "$DEPLOY_NAME" "$DELAY"
+  printf '\n'
+  exit 0
+fi
+
+# --- build -------------------------------------------------------------------
+printf 'ship: building (this is the slow part, log: %s)\n' "$BUILD_LOG"
+build() {
+  buildah bud \
+    --build-arg "GIT_SHA=${sha}" \
+    -t "${IMAGE}:${sha}" \
+    -t "${IMAGE}:latest" \
+    "$REPO_DIR"
+}
+if ! build >>"$BUILD_LOG" 2>&1; then
+  printf 'ship: build failed under the default isolation, retrying with chroot\n' >&2
+  if ! buildah bud --isolation chroot \
+      --build-arg "GIT_SHA=${sha}" \
+      -t "${IMAGE}:${sha}" \
+      -t "${IMAGE}:latest" \
+      "$REPO_DIR" >>"$BUILD_LOG" 2>&1; then
+    tail -n 40 "$BUILD_LOG" | sed 's/^/  /' >&2
+    die "build failed - full log: $BUILD_LOG"
+  fi
+fi
+
+# --- push --------------------------------------------------------------------
+printf 'ship: pushing\n'
+buildah push --digestfile "${STATE_DIR}/last-digest" "${IMAGE}:${sha}" >>"$BUILD_LOG" 2>&1 \
+  || die "push failed for ${IMAGE}:${sha} - full log: $BUILD_LOG"
+buildah push "${IMAGE}:latest" >>"$BUILD_LOG" 2>&1 \
+  || die "push failed for ${IMAGE}:latest - full log: $BUILD_LOG"
+
+digest="$(cat "${STATE_DIR}/last-digest" 2>/dev/null || echo unknown)"
+printf 'ship: pushed %s\n' "$digest"
+
+if [ "$do_deploy" = 0 ]; then
+  printf 'ship: --no-deploy, stopping here\n'
+  exit 0
+fi
+
+# --- deploy (delayed) --------------------------------------------------------
+# Written before the trigger so a container that never comes back leaves the
+# marker behind for the next boot to report.
+printf 'sha=%s\nimage=%s\nrequested=%s\n' \
+  "$sha" "${IMAGE}:latest" "$(date -u +%FT%TZ)" > "${PENDING}.tmp"
+mv "${PENDING}.tmp" "$PENDING"
+
+setsid nohup bash -c '
+  sleep "$1"
+  {
+    echo "requested_start $(date -u +%FT%TZ)"
+    out="$(curl -sS -m 180 -XPOST "$2/run/$3" 2>&1)"
+    rc=$?
+    echo "curl_rc=$rc"
+    echo "$out"
+    echo "requested_end $(date -u +%FT%TZ)"
+  } >> "$4"
+' _ "$DELAY" "$DEPLOY_URL" "$DEPLOY_NAME" "$DEPLOY_LOG" >/dev/null 2>&1 &
+
+printf 'ship: deploy scheduled in %ss; this container will be recreated\n' "$DELAY"
+printf 'ship: log %s - verify with `ship --status` after the next boot\n' "$DEPLOY_LOG"

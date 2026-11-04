@@ -120,6 +120,80 @@ seed_rules() {
 }
 seed_rules
 
+# --- seed skills into every agent's skill directory ---------------------------
+# T3 Code scans these roots for skills, and one SKILL.md works for all of them.
+# Same rule as the agent rules above: seed when absent, refresh while the copy
+# is still ours, and leave a file the user edited alone for good.
+seed_skills() {
+  local src=/etc/codecontainer/skills
+  [ -d "$src" ] || return 0
+  local stampdir=/root/.config/codecontainer
+  mkdir -p "$stampdir"
+  local dstroot srcfile name dst stamp want cur
+  for dstroot in \
+    "/root/.config/opencode/skills" \
+    "/root/.codex/skills" \
+    "/root/.claude/skills" \
+    "/root/.agents/skills"
+  do
+    mkdir -p "$dstroot"
+    for srcfile in "$src"/*/SKILL.md; do
+      [ -f "$srcfile" ] || continue
+      name="$(basename "$(dirname "$srcfile")")"
+      dst="$dstroot/$name/SKILL.md"
+      stamp="$stampdir/skill-$(printf '%s' "$dst" | tr '/' '-').sha"
+      want="$(sha256sum "$srcfile" | cut -d' ' -f1)"
+      mkdir -p "$(dirname "$dst")"
+      if [ ! -f "$dst" ]; then
+        cp "$srcfile" "$dst"
+        printf '%s\n' "$want" > "$stamp"
+        echo "[entrypoint] seeded skill -> $dst"
+        continue
+      fi
+      cur="$(sha256sum "$dst" | cut -d' ' -f1)"
+      if [ "$cur" = "$want" ]; then
+        printf '%s\n' "$want" > "$stamp"
+        continue
+      fi
+      if [ -f "$stamp" ] && [ "$cur" = "$(cat "$stamp")" ]; then
+        cp "$srcfile" "$dst"
+        printf '%s\n' "$want" > "$stamp"
+        echo "[entrypoint] refreshed skill -> $dst"
+      fi
+    done
+  done
+}
+seed_skills
+
+# --- deploy verification ------------------------------------------------------
+# `ship` bakes the commit it built from into the image (build arg GIT_SHA) and
+# leaves a marker before it asks DockerDeploy to recreate this container. The
+# old container cannot watch the new one come up, so the check happens here:
+# compare the marker with the commit this image was built from, record the
+# result, and clear the marker. A release that never landed then shows up in
+# the log instead of looking like a success.
+verify_deploy() {
+  local state=/root/.config/codecontainer
+  local pending="$state/pending-deploy"
+  local log="$state/deploy.log"
+  [ -f "$pending" ] || return 0
+  local want have
+  want="$(sed -n 's/^sha=//p' "$pending" | head -1)"
+  have="$(cat /etc/codecontainer/commit 2>/dev/null || echo unknown)"
+  mkdir -p "$state"
+  {
+    echo "boot_at $(date -u +%FT%TZ)"
+    echo "image_commit=$have"
+    if [ -n "$want" ] && [ "$want" = "$have" ]; then
+      echo "verified sha=$have"
+    else
+      echo "MISMATCH expected=${want:-?} running=$have"
+    fi
+  } >> "$log"
+  rm -f "$pending"
+}
+verify_deploy
+
 # --- npm: deny lifecycle scripts by default -----------------------------------
 # `npm install` runs package-controlled code (preinstall/install/postinstall) as
 # root, transitively, with GH_TOKEN in the environment. That is the realistic
@@ -271,6 +345,7 @@ banner() {
   printf '  pair a device  ->  docker compose exec code pair\n'
   printf '  first run      ->  opencode auth login\n'
   printf '  agent rules    ->  /root/.config/opencode/AGENTS.md\n'
+  printf '  image commit   ->  %s\n' "$(cat /etc/codecontainer/commit 2>/dev/null || echo unknown)"
   printf '  T3 pairing token below is a password. Do not expose this port.\n\n'
 }
 

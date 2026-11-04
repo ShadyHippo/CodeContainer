@@ -287,14 +287,16 @@ COPY config/gitconfig /etc/gitconfig
 COPY config/bashrc /etc/bash.bashrc.d-codecontainer
 COPY config/zshrc /etc/zsh/zshrc.d-codecontainer
 COPY config/AGENTS.md /etc/codecontainer/AGENTS.md
+COPY config/skills /etc/codecontainer/skills
 COPY bin/preview /usr/local/bin/preview
 COPY bin/agent-notes /usr/local/bin/agent-notes
 COPY bin/tooling /usr/local/bin/tooling
 COPY bin/pair /usr/local/bin/pair
 COPY bin/chromium /usr/local/bin/chromium
+COPY bin/ship /usr/local/bin/ship
 
 RUN set -eux; \
-    chmod 0755 /usr/local/bin/preview /usr/local/bin/agent-notes /usr/local/bin/tooling /usr/local/bin/pair /usr/local/bin/chromium; \
+    chmod 0755 /usr/local/bin/preview /usr/local/bin/agent-notes /usr/local/bin/tooling /usr/local/bin/pair /usr/local/bin/chromium /usr/local/bin/ship; \
     printf '\n[ -f /etc/bash.bashrc.d-codecontainer ] && . /etc/bash.bashrc.d-codecontainer\n' >> /etc/bash.bashrc; \
     printf '\n[ -f /etc/zsh/zshrc.d-codecontainer ] && . /etc/zsh/zshrc.d-codecontainer\n' >> /etc/zsh/zshrc; \
     mkdir -p /root/Projects; \
@@ -358,6 +360,15 @@ RUN set -eux; \
 # Runtime-only: agent-installed npm globals land in the persisted ~/.local
 # instead of the container's writable layer (image-owned tools stay in /usr/local).
 ENV NPM_CONFIG_PREFIX=/root/.local
+
+# --- release identity --------------------------------------------------------
+# `bin/ship` passes the commit it built from, and the entrypoint compares it
+# with the marker a deploy leaves behind. Without this a release that never
+# landed looks exactly like one that did. Deliberately last: changing it
+# invalidates one tiny layer and nothing above.
+ARG GIT_SHA=unknown
+RUN install -d /etc/codecontainer \
+ && printf '%s\n' "${GIT_SHA}" > /etc/codecontainer/commit
 
 WORKDIR /root/Projects
 # Docker 29 rejects port ranges in the image's ExposedPorts (EXPOSE), even
