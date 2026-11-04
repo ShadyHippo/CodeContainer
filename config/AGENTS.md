@@ -38,10 +38,17 @@ directory.
 **any** free port is reachable — there is no port range to stay inside.
 
 1. Bind `0.0.0.0` — never `127.0.0.1`, which is this container's own loopback
-   and 404s for the user:
+   and 404s for the user — and pick any free port. Most dev servers will pick
+   one themselves when asked for port `0`, and print the port they really bound:
 
-       PORT=$(freeport)
-       pnpm dev --host 0.0.0.0 --port "$PORT"
+       pnpm dev --host 0.0.0.0 --port 0     # then read the port from its output
+
+   If the server insists on a number, take a free one. Empty output here means
+   nothing is holding it:
+
+       ss -Hltn 'sport = :5199'
+
+   Don't take 3773 (T3 Code) or 4096 (the optional OpenCode API).
 
 2. Run `preview`. It prints a URL for every listener using `PREVIEW_HOST`
    (this container's own address or name) and flags anything bound to loopback,
@@ -50,9 +57,6 @@ directory.
    Ports are direct — no reverse proxy — so HMR and websockets behave normally.
    Do not build demo links from the T3 Code hostname: it forwards only the app
    port.
-
-3773 is T3 Code and 4096 is reserved for the optional OpenCode API; don't take
-them.
 
 ## There is no Docker here
 

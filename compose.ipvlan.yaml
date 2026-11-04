@@ -21,6 +21,12 @@
 services:
   code:
     ports: !reset []
+    environment:
+      # No published range in this mode, so clear the range `preview` and the
+      # startup banner filter by - otherwise they warn about a range that no
+      # longer applies.
+      PORT_BASE: ""
+      PORT_END: ""
     networks:
       default: {}
       br0:

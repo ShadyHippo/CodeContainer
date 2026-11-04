@@ -517,7 +517,6 @@ config/AGENTS.md           the "where you are" rules seeded into every agent
 config/gitconfig           system git defaults (identity, HTTPS cred helper)
 config/{bashrc,zshrc}      shell setup
 bin/preview                list live dev servers as reachable URLs
-bin/freeport               pick a free port for a dev server
 bin/agent-notes            print the agent rules
 bin/tooling                render the live toolchain into the agent rules
 scripts/preflight.sh       host checks before deploying
