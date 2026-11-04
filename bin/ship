@@ -12,7 +12,20 @@
 # reads that log.
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Resolve the repo from the script's own location when it lives in the
+# checkout (./bin/ship), and fall back to the canonical path when it is the
+# installed copy in /usr/local/bin, where ../ is not a git repository.
+default_repo() {
+  local here
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  if git -C "$here" rev-parse --git-dir >/dev/null 2>&1; then
+    printf '%s' "$here"
+  else
+    printf '%s' "/root/Projects/CodeContainer"
+  fi
+}
+
+REPO_DIR="${REPO_DIR:-$(default_repo)}"
 IMAGE="${IMAGE:-ghcr.io/shadyhippo/codecontainer}"
 DEPLOY_NAME="${DEPLOY_NAME:-codecontainer}"
 DEPLOY_URL="${DEPLOY_URL:-http://docker-deploy:9000}"
