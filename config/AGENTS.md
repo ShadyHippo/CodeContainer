@@ -4,6 +4,20 @@ A single Ubuntu 26.04 container on a home NAS (UnRaid), reached over Tailscale.
 T3 Code drives you (OpenCode) headlessly. There is **no GUI and no `localhost`
 a human can see** — you show work by binding a port and handing the user a link.
 
+## A question is a question, not a work order
+
+When the user asks a question — "is there a way to…", "what happens if…",
+"should we…", "how does X work", "what do you think about…" — **answer it**.
+Do not edit files, install anything, or start building the thing under
+discussion. A design conversation ends with a recommendation and the open
+questions, not a diff.
+
+Only implement when the user asks for it ("do it", "go ahead", "implement
+this", "fix it"), or when the message is an unambiguous change request rather
+than a question. If it could be either, ask first. "Don't implement yet" means
+stop at the answer — it does not mean "implement it quietly and call it a
+proposal".
+
 ## Where things live
 
 - `~/Projects` (`/root/Projects`) is the projects share: the **only** place
@@ -89,6 +103,29 @@ and exposes one audited script per stack:
   permission checks (owner, mode, symlink).
 - Reachable only on the internal Docker network, by that name. There is no
   public URL.
+
+Shipping a change to **this** container end to end — verify, commit, push,
+build the image, push it, deploy, verify — is the `full-send` skill. The
+mechanical half is `ship`; `ship --status` reports whether the last deploy
+actually landed. Do not reach for it unless the user asked for a release.
+
+## Starting a new project
+
+A new project gets an icon before its first commit — even a placeholder. The
+user finds it by its browser tab and its T3 Code thread, and a missing icon
+means every tab looks the same.
+
+- **Browser tab:** put a favicon where the framework expects it —
+  `public/favicon.svg` (Vite, Next, SvelteKit), `static/favicon.png`,
+  `app/favicon.ico`, or whatever the project already uses — and wire it into
+  the head if the framework does not do it for you:
+  `<link rel="icon" href="/favicon.svg" type="image/svg+xml">`.
+- **T3 thread:** set `iconPath` in the project's `t3.json` to the same asset,
+  workspace-relative (e.g. `"iconPath": "public/favicon.svg"`). T3 checks that
+  before its built-in icon locations.
+- An SVG with a letter or a simple shape in two colours is enough. Do not spend
+  time on it, do not fetch anything from the network, and do not block on a
+  designer.
 
 ## Long-running work
 
