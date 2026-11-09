@@ -387,6 +387,42 @@ the old container can watch the new one start. Instead:
 The banner prints the running image commit, so "did the release land?" is also
 answerable at a glance.
 
+### Asking the council: the `council` skill
+
+Some work wants four more opinions rather than one strong one — launch copy, a
+plan, a review, a trade-off call. Agents get a `council` skill for that, built to
+be too cheap to think about: it discovers what this container can actually call
+(`opencode models`) and intersects that with models.dev prices, keeping free or
+near-free models, **one per family**, five in all.
+
+```bash
+council roster                     # who's on the bench, and what they cost
+council roster --check             # canary each pick, drop anything that can't answer
+council run "Write the launch post for X"
+council run "Review this plan" --file plan.md --threshold 8 --rounds 3
+```
+
+Every member answers independently, then every member grades every answer
+blind — self-scores excluded, labels shuffled. If a judge is below the bar, the
+harshest critic rewrites the leader from the collected criticisms and the
+council grades incumbent vs challenger blind, keeping only a real improvement.
+It stops on unanimity, a plateau, the round limit, or the cost guard
+(`--max-cost`, default $0.50 estimated).
+
+Artifacts land in `.council/<timestamp>-<slug>/`: every round's answers, grades
+and scores, plus `final.md` and `report.md`. A full run has cost a fraction of a
+cent. Exit `0` is unanimous, `3` is "stopped short" (answer and criticism are
+still written), `1` is "could not run".
+
+The bench is discovered, not hardcoded: `opencode models` says what is callable,
+models.dev says what it costs. Two rules are fixed regardless of price —
+**GLM 5.3 Flash, DeepSeek V4.1 Flash and MiMo v2.6 Flash are always included**,
+and **contributor models are never used**.
+
+The bench is cheap, so agreement is a weak signal: good for finding flaws, not
+for certifying quality. That caveat is in the skill, along with "do not council
+code that will run".
+
 ## Pairing a device
 
 **The container prints a ready-to-use link on every start.** It's in the logs:
@@ -515,7 +551,7 @@ Ubuntu 26.04 LTS. Roughly 5.9 GB unpacked.
 | GPU video   | ffmpeg with vaapi/qsv/nvenc + PSNR/SSIM; `mediainfo`, `mkvtoolnix`, `vainfo`. Pass `/dev/dri` for hardware transcode. |
 | Build/push  | `buildah` — daemonless image builds and pushes. **No docker socket, ever.** Needs `security_opt: seccomp=unconfined`. |
 | LSPs        | rust-analyzer, gopls, clangd, lua-language-server, typescript-language-server, pyright, bash/yaml/json/html/css/tailwind/dockerfile |
-| CLI         | git + delta, gh, ripgrep, fd, fzf, bat, jq, tmux, lazygit-adjacent tooling, shellcheck, shfmt |
+| CLI         | git + delta, gh, ripgrep, fd, fzf, bat, jq, tmux, lazygit-adjacent tooling, shellcheck, shfmt, `council` (five-model cheap-review loop) |
 
 Python is locked to venvs (`PIP_REQUIRE_VIRTUALENV=1`) — a bare `pip install`
 fails on purpose. Use `uv venv` or `python3 -m venv`.

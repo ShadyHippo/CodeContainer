@@ -16,6 +16,7 @@ secrets/
 # Local / runtime state
 # ---------------------------------------------------------------------------
 Projects/
+.council/
 *.log
 .cache/
 /run/

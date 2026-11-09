@@ -294,9 +294,10 @@ COPY bin/tooling /usr/local/bin/tooling
 COPY bin/pair /usr/local/bin/pair
 COPY bin/chromium /usr/local/bin/chromium
 COPY bin/ship /usr/local/bin/ship
+COPY bin/council /usr/local/bin/council
 
 RUN set -eux; \
-    chmod 0755 /usr/local/bin/preview /usr/local/bin/agent-notes /usr/local/bin/tooling /usr/local/bin/pair /usr/local/bin/chromium /usr/local/bin/ship; \
+    chmod 0755 /usr/local/bin/preview /usr/local/bin/agent-notes /usr/local/bin/tooling /usr/local/bin/pair /usr/local/bin/chromium /usr/local/bin/ship /usr/local/bin/council; \
     printf '\n[ -f /etc/bash.bashrc.d-codecontainer ] && . /etc/bash.bashrc.d-codecontainer\n' >> /etc/bash.bashrc; \
     printf '\n[ -f /etc/zsh/zshrc.d-codecontainer ] && . /etc/zsh/zshrc.d-codecontainer\n' >> /etc/zsh/zshrc; \
     mkdir -p /root/Projects; \

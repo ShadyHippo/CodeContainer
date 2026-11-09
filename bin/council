@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# council - put a task in front of five too-cheap-to-meter models, have them
+# grade each other, and hill-climb until every judge is happy.
+#
+# The engine lives with the skill so the code and its instructions cannot drift
+# apart. COUNCIL_LIB overrides the path; otherwise fall back to the repo copy,
+# which keeps `bin/council` testable before the image is rebuilt.
+set -euo pipefail
+
+here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+
+lib="${COUNCIL_LIB:-/etc/codecontainer/skills/council/council.mjs}"
+if [[ ! -f "$lib" ]]; then
+  lib="$here/../config/skills/council/council.mjs"
+fi
+if [[ ! -f "$lib" ]]; then
+  echo "council: engine not found (looked for /etc/codecontainer/skills/council/council.mjs)" >&2
+  exit 1
+fi
+
+exec node "$lib" "$@"

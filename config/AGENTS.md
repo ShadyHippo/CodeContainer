@@ -109,6 +109,14 @@ build the image, push it, deploy, verify — is the `full-send` skill. The
 mechanical half is `ship`; `ship --status` reports whether the last deploy
 actually landed. Do not reach for it unless the user asked for a release.
 
+When the user wants **more opinions** — launch copy, a plan, a review, a
+trade-off call — that is the `council` skill. Five free-or-near-free models
+answer independently, grade each other blind, and hill-climb until every judge
+is happy or the run plateaus. The bench always includes GLM 5.3 Flash, DeepSeek
+V4.1 Flash and MiMo v2.6 Flash, and never includes contributor models. It is
+text-only: it does not touch the repo, and it is not a reason to skip reviewing
+code that will run.
+
 ## Starting a new project
 
 A new project gets an icon before its first commit — even a placeholder. The
