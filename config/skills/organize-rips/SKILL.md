@@ -114,8 +114,14 @@ discforge classify "$f"        # samples 3 windows, runs idet
 | `mixed` | inspect | hybrid or badly flagged; look at frames |
 
 For a title that is mostly film but has genuinely interlaced sections, use
-`--action ivtc_hybrid`: field match, deinterlace only the frames that are still
-combed, then decimate. Do not stack `ivtc` and `deinterlace` by hand.
+`--action ivtc_hybrid`: field match, then deinterlace the frames still flagged,
+then decimate. Do not stack `ivtc` and `deinterlace` by hand.
+
+**Known limitation:** that middle step only touches frames the bitstream flags as
+interlaced, so on a disc whose flags lie it degrades to plain `ivtc`. If the
+audit still reports combing after `ivtc_hybrid`, re-encode with
+`--action deinterlace` (which processes every frame) and accept the slight
+softening. The audit is what catches this; do not eyeball it once and move on.
 
 Rules that matter more than the verdict:
 
@@ -228,12 +234,15 @@ or to leave it alone rather than to accept a worse encode.
 
 The audit also asserts frame count (±0.2%, expected from the fps ratio for
 IVTC), fps, resolution, sample aspect ratio, audio/subtitle track counts,
-duration (±0.75 s), residual interlacing (the output is tiled into 12 contiguous
-chunks and every chunk is judged on its own: repeated fields fail at ≥ 0.15,
+duration (±0.75 s), residual interlacing (the output is tiled into contiguous
+~15s tiles and every tile is judged on its own: repeated fields fail at ≥ 0.15,
 combing fails at ≥ 0.95 in any tile (a fully combed tile reads 1.00), and
-0.70–0.95 is reported as a warning to eyeball — idet over-reads detail-heavy
+0.50–0.95 is reported as a warning to eyeball — idet over-reads detail-heavy
 content, so treat that band as "look at it", not "it is broken"; a per-tile max
-is used because averaging a combed section into the whole file hides it), and no freeze ≥ 2 s
+is used because averaging a combed section into the whole file hides it. Note
+the deliberate asymmetry: source classification calls 0.90 interlaced, the audit
+needs 0.95 before failing an output, because a wrong re-encode is cheaper than
+quarantining a clean one), and no freeze ≥ 2 s
 — including a freeze that runs to the end of the file, which is the classic
 signature of a stalled encode.
 
@@ -242,8 +251,8 @@ check. Do not lower them to make a title pass.
 
 The audit decodes the output several times (frame count, freezes, interlace,
 VMAF). At 1080p that is minutes per title; that cost is the point, and
-`--interlace-chunks N` only exists to trade coverage for time — the final
-decision should use the default full tile set.
+`--interlace-chunk-seconds N` only trades tile size for time (below 10s is
+clamped) — the final decision should use the default full tile set.
 
 `--remux` copies without re-encoding, so it cannot remove pulldown or combing.
 The tool refuses `--remux --action ivtc|deinterlace`, and the audit will
@@ -257,6 +266,8 @@ content that is already progressive and efficient, nothing else.
 | VMAF/XPSNR low | re-encode at quality−4 (lower number = better), max 2 attempts |
 | still interlaced after filtering | wrong action — re-classify longer, try the other chain, or `ivtc_hybrid` |
 | freeze at the end of the file | encoder stalled; re-encode, and check free space |
+| freeze that is also in the source | a black hold or fade in the master, not an encode fault: confirm with `discforge audit "$src" "$src"`, then raise `--freeze-seconds` and note it in the report |
+| "belongs to a different source" | the sidecar was written for another file; re-encode rather than bypassing the check |
 | frame count short/long | encoder dropped or duplicated frames; re-run; check `decimate` |
 | fps wrong | IVTC applied to 25 fps, or missing on telecined 29.97 |
 | duration short | truncated file; re-encode, check free space |
