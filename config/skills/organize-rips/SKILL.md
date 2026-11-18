@@ -230,9 +230,10 @@ The audit also asserts frame count (±0.2%, expected from the fps ratio for
 IVTC), fps, resolution, sample aspect ratio, audio/subtitle track counts,
 duration (±0.75 s), residual interlacing (the output is tiled into 12 contiguous
 chunks and every chunk is judged on its own: repeated fields fail at ≥ 0.15,
-combing fails at ≥ 0.90 in any chunk, and 0.60–0.90 is reported as a warning to
-eyeball; a per-chunk max is used because averaging a combed section into the
-whole file hides it), and no freeze ≥ 2 s
+combing fails at ≥ 0.95 in any tile (a fully combed tile reads 1.00), and
+0.70–0.95 is reported as a warning to eyeball — idet over-reads detail-heavy
+content, so treat that band as "look at it", not "it is broken"; a per-tile max
+is used because averaging a combed section into the whole file hides it), and no freeze ≥ 2 s
 — including a freeze that runs to the end of the file, which is the classic
 signature of a stalled encode.
 
