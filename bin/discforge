@@ -369,7 +369,10 @@ def classify(path: str, samples: int = 3, seconds: float = 60.0) -> dict:
 FILTER_CHAINS = {
     "none": [],
     "ivtc": ["fieldmatch=order=auto:combmatch=full:combpel=80", "decimate"],
-    "deinterlace": ["bwdif=mode=send_frame:parity=auto:deint=interlaced"],
+    # deint=all, not deint=interlaced: the classifier only picks this action
+    # when the source is >=90% combed, and DVD field flags are known to lie.
+    # Trusting the flag leaves mis-flagged combed frames untouched.
+    "deinterlace": ["bwdif=mode=send_frame:parity=auto:deint=all"],
     # Hybrid film/video titles: match fields first, then deinterlace only the
     # frames that are still combed, then drop duplicates.
     "ivtc_hybrid": [
@@ -485,7 +488,14 @@ def cmd_encode(args: argparse.Namespace) -> int:
         print(f"classify: {verdict['verdict']} ({verdict['confidence']}) -> {action}",
               file=sys.stderr)
         if action == "inspect":
-            die("classification is ambiguous; rerun with --action none|ivtc|deinterlace")
+            die("classification is ambiguous; rerun with "
+                "--action none|ivtc|ivtc_hybrid|deinterlace")
+
+    if args.remux and action != "none":
+        # A stream copy cannot remove pulldown or combing; recording the
+        # classification while copying would make the audit compare against a
+        # chain the file never went through.
+        die(f"--remux cannot undo {action}; pass --action none to copy as-is")
 
     metadata: dict[str, str] = {}
     for item in args.meta or []:
@@ -507,7 +517,7 @@ def cmd_encode(args: argparse.Namespace) -> int:
         "version": 1,
         "source": profile(args.src),
         "fingerprint": quick_fingerprint(args.src),
-        "action": action,
+        "action": "none" if args.remux else action,
         "denoise": args.denoise,
         "encoder": "copy" if args.remux else args.encoder,
         "quality": args.quality,
@@ -650,10 +660,17 @@ def run_xpsnr(out_path: str, src_path: str, ref_filters: str) -> dict | None:
         which("ffmpeg"), "-hide_banner", "-nostdin", "-v", "info",
         "-i", out_path, "-i", src_path, "-lavfi", chain, "-f", "null", "-",
     ])
-    m = re.search(r"XPSNR\s+y:\s*([0-9.]+)\s+u:\s*([0-9.]+)\s+v:\s*([0-9.]+)", proc.stderr)
+    m = re.search(r"XPSNR\s+y:\s*([0-9.]+|inf)\s+u:\s*([0-9.]+|inf)\s+v:\s*([0-9.]+|inf)",
+                  proc.stderr)
     if not m:
         return None
-    return {"y": float(m.group(1)), "u": float(m.group(2)), "v": float(m.group(3))}
+
+    def value(text: str) -> float:
+        # A stream copy scores "inf", which must not read as a failure.
+        return 999.0 if text == "inf" else float(text)
+
+    return {"y": value(m.group(1)), "u": value(m.group(2)), "v": value(m.group(3)),
+            "lossless": all(g == "inf" for g in m.groups())}
 
 
 def detect_freezes(path: str, min_seconds: float, duration: float) -> list[dict]:
@@ -684,6 +701,9 @@ def cmd_audit(args: argparse.Namespace) -> int:
     if not os.path.isfile(args.out):
         die(f"no such output: {args.out}")
 
+    if not os.path.isfile(args.src):
+        die(f"no such file: {args.src}")
+
     sidecar = {}
     job_path = Path(args.job) if args.job else Path(f"{args.out}.job.json")
     if job_path.is_file():
@@ -692,7 +712,10 @@ def cmd_audit(args: argparse.Namespace) -> int:
         except json.JSONDecodeError:
             sidecar = {}
 
-    if sidecar.get("fingerprint"):
+    if sidecar:
+        if not sidecar.get("fingerprint"):
+            die(f"{job_path} has no source fingerprint; refusing to trust it. "
+                f"Re-encode, or pass --action/--ref-filters explicitly")
         if quick_fingerprint(args.src) != sidecar["fingerprint"]:
             die(f"{job_path} belongs to a different source "
                 f"(fingerprint mismatch); refusing to audit against the wrong chain")
@@ -776,12 +799,17 @@ def cmd_audit(args: argparse.Namespace) -> int:
     # Sample the whole file, not the first two minutes: chain failures and
     # hybrid sections live past the opening credits.
     out_duration = out_profile["duration"] or 0.0
-    if args.interlace_samples > 0:
-        windows = idet_windows(args.out, out_duration, samples=args.interlace_samples)
+    # Tile the output contiguously and judge every tile separately. Full
+    # coverage matters: a combed section is diluted below any threshold if it
+    # is averaged into one whole-file window, and sparse samples miss it
+    # entirely. Equal tiles cost about one full decode in total.
+    chunks = max(1, args.interlace_chunks)
+    if out_duration > 0:
+        span = out_duration / chunks
+        windows = [idet_window(args.out, i * span, max(1.0, span))
+                   for i in range(chunks)]
     else:
-        # Whole file. A combed section between sparse samples would otherwise
-        # pass, and the brief is quality over speed.
-        windows = [idet_window(args.out, 0.0, max(1.0, out_duration))]
+        windows = [idet_window(args.out, 0.0, 1.0)]
     per_window = []
     for index, counters in enumerate(windows):
         analysed = analyse_counters(counters, out_fps, classifying=False)
@@ -851,7 +879,8 @@ def cmd_audit(args: argparse.Namespace) -> int:
             metrics["vmaf_error"] = "libvmaf ran but produced no score (frame mismatch or bad filter chain)"
         xpsnr = run_xpsnr(args.out, args.src, ref_filters)
         if xpsnr:
-            metrics["xpsnr"] = {k: round(v, 3) for k, v in xpsnr.items()}
+            metrics["xpsnr"] = {
+                k: (v if isinstance(v, bool) else round(v, 3)) for k, v in xpsnr.items()}
             if args.xpsnr_min is not None and xpsnr["y"] < args.xpsnr_min:
                 reasons.append(f"XPSNR y {xpsnr['y']:.2f} < {args.xpsnr_min}")
         elif not vmaf_attempted:
@@ -1037,9 +1066,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--subsample", type=int, default=4)
     p.add_argument("--no-vmaf", action="store_true")
     p.add_argument("--freeze-seconds", type=float, default=2.0)
-    p.add_argument("--interlace-samples", type=int, default=0,
-                   help="idet windows across the output; 0 (default) scans the "
-                        "whole file, which costs one extra decode pass")
+    p.add_argument("--interlace-chunks", type=int, default=12,
+                   help="contiguous tiles to idet across the whole output; each "
+                        "is judged separately (default 12, ~one extra decode pass)")
     p.add_argument("--max-interlace", type=float, default=0.90,
                    help="fail if any sampled window reads this combed (default 0.90)")
     p.add_argument("--job", default=None,

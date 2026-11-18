@@ -228,10 +228,11 @@ or to leave it alone rather than to accept a worse encode.
 
 The audit also asserts frame count (±0.2%, expected from the fps ratio for
 IVTC), fps, resolution, sample aspect ratio, audio/subtitle track counts,
-duration (±0.75 s), residual interlacing (whole file by default: repeated fields
-fail at ≥ 0.15, combing fails at ≥ 0.90 — idet's noise floor on detailed line art
-reaches ~0.8 even for a bit-identical file, so a tighter bar quarantines clean
-encodes — and 0.60–0.90 is reported as a warning to eyeball), and no freeze ≥ 2 s
+duration (±0.75 s), residual interlacing (the output is tiled into 12 contiguous
+chunks and every chunk is judged on its own: repeated fields fail at ≥ 0.15,
+combing fails at ≥ 0.90 in any chunk, and 0.60–0.90 is reported as a warning to
+eyeball; a per-chunk max is used because averaging a combed section into the
+whole file hides it), and no freeze ≥ 2 s
 — including a freeze that runs to the end of the file, which is the classic
 signature of a stalled encode.
 
@@ -240,8 +241,13 @@ check. Do not lower them to make a title pass.
 
 The audit decodes the output several times (frame count, freezes, interlace,
 VMAF). At 1080p that is minutes per title; that cost is the point, and
-`--interlace-samples N` only exists for a quick look, never for the final
-decision.
+`--interlace-chunks N` only exists to trade coverage for time — the final
+decision should use the default full tile set.
+
+`--remux` copies without re-encoding, so it cannot remove pulldown or combing.
+The tool refuses `--remux --action ivtc|deinterlace`, and the audit will
+(rightly) fail a remuxed telecined title on repeated fields. Remux is for
+content that is already progressive and efficient, nothing else.
 
 **Failure handling:**
 
