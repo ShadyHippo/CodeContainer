@@ -82,6 +82,20 @@ No `docker`, no `docker compose`, no DinD, no socket. If a project ships a
   just use SQLite.
 - Services: run them as processes, like the databases.
 
+## Compose files are `compose.yaml`
+
+Call them `compose.yaml`, with `compose.override.yaml` for overrides. Do **not**
+create `docker-compose.yml` or `docker-compose.yaml`: those are the Compose v1
+names, and Compose v2 only auto-loads `compose.yaml` (plus
+`compose.override.yaml`), so a v1-named file is invisible without an explicit
+`-f`.
+
+If a project you are asked to change ships `docker-compose.yml`, rename it to
+`compose.yaml` and update every reference — scripts, CI, docs, and the
+`docker compose` commands people copy. This repo already works that way:
+`compose.example.yaml` is the committed template, copied to a gitignored
+`compose.yaml`.
+
 ## Releasing services (docker-deploy)
 
 You cannot deploy containers yourself — no socket. A separate container,
