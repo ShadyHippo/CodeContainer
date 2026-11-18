@@ -40,3 +40,7 @@ Thumbs.db
 .idea/
 .vscode/
 *.code-workspace
+
+# Python bytecode (bin/ ships a few stdlib-only scripts)
+__pycache__/
+*.pyc

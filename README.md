@@ -268,14 +268,20 @@ or it vanishes on the next rebuild. The rules:
 | Other binaries (static builds, HandBrake, …) | `/root/.local/bin` or the project dir | download/extract there; it is already on `PATH` |
 | apt packages (`apt-get install`) | **not durable** | lands in the container layer; fine for "right now", lost on rebuild. Add to the Dockerfile if you want it permanent |
 
-**So yes — an agent can install HandBrake** (`apt-get install handbrake-cli` for
-immediate use, or a static build dropped into `~/.local/bin` to survive rebuilds),
-and `ffmpeg` is already in the image. That makes workflows like "watch a folder,
-transcode with HandBrake/ffmpeg, rename into a Jellyfin-friendly layout" entirely
-feasible: T3 Code orchestrates the agent, the agent drives the CLI tools against
-files under `/root/Projects`, and results land on your durable share. Nothing
-Jellyfin-specific is preinstalled, but the agent can pull whatever client/API
-tooling it needs using the rules above.
+**Disc rips → Jellyfin is a supported path**, not something an agent has to
+improvise. `discforge` probes a title, classifies it with `idet` (progressive /
+telecined / interlaced video), encodes with the right filter chain, and then
+*audits* the result against its source — frame count, fps, residual interlacing,
+track preservation, freezes, and VMAF or XPSNR. A transcode that misses the bar
+is retried, then quarantined; it never lands in the library silently. The
+`organize-rips` skill carries the workflow, thresholds and naming rules, and ARM's
+output is mounted read-only as the input directory.
+
+The image includes `ffmpeg` (distro build: VAAPI, x265, SVT-AV1, AV1) and
+`ffmpeg-vmaf` (a separate decode-only build with libvmaf, because the distro
+package ships without it). Encoding uses the former; VMAF scoring uses the
+latter. No HandBrake: it hides the filter chain, and the audit needs to know
+exactly what was applied.
 
 Agents are root inside the container, so `apt-get` works directly — but prefer
 the durable routes above unless the tool is genuinely a system package.
@@ -360,6 +366,11 @@ Agents get a `full-send` skill that does the whole loop — verify, commit, push
 build, push the image, deploy — and settles the thread on success. It is seeded
 into `~/.config/opencode/skills`, `~/.codex/skills`, `~/.claude/skills` and
 `~/.agents/skills` from `config/skills/`.
+
+`organize-rips` is seeded the same way, and is the one that turns a directory of
+ARM rips into an audited Jellyfin library: `discforge` does the probing,
+classification, encoding and gating, while the skill carries the naming rules,
+quality thresholds and the "what to do when the audit fails" decisions.
 
 The work is split so the deterministic half is testable:
 
@@ -548,7 +559,8 @@ Ubuntu 26.04 LTS. Roughly 5.9 GB unpacked.
 | Build tools | make, CMake, Ninja, Meson, autotools, protobuf                        |
 | Databases   | PostgreSQL 18, MariaDB 11, Redis 8, SQLite (run as processes)         |
 | Docs/media  | Pandoc, Typst, TeX Live, ImageMagick, ffmpeg, Graphviz                |
-| GPU video   | ffmpeg with vaapi/qsv/nvenc + PSNR/SSIM; `mediainfo`, `mkvtoolnix`, `vainfo`. Pass `/dev/dri` for hardware transcode. |
+| GPU video   | ffmpeg with vaapi/qsv/nvenc + PSNR/SSIM/XPSNR; `ffmpeg-vmaf` (libvmaf 3 built in-image) for perceptual scoring; `mediainfo`, `mkvtoolnix`, `vainfo`. Pass `/dev/dri` for hardware transcode. |
+| Disc rips   | `discforge` — probe, interlace classification, encode, and an audit gate (VMAF/fps/tracks/interlace) for turning ARM rips into a Jellyfin library. See the `organize-rips` skill. |
 | Build/push  | `buildah` — daemonless image builds and pushes. **No docker socket, ever.** Needs `security_opt: seccomp=unconfined`. |
 | LSPs        | rust-analyzer, gopls, clangd, lua-language-server, typescript-language-server, pyright, bash/yaml/json/html/css/tailwind/dockerfile |
 | CLI         | git + delta, gh, ripgrep, fd, fzf, bat, jq, tmux, lazygit-adjacent tooling, shellcheck, shfmt, `council` (five-model cheap-review loop) |

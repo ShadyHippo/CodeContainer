@@ -44,6 +44,7 @@ PROBED=(
   "meson|--version"
   "make|--version"
   "ffmpeg|-version"
+  "ffmpeg-vmaf|-version"
   "magick|--version"
   "dot|-V"
   "pandoc|--version"

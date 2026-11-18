@@ -40,6 +40,68 @@ RUN set -eux; \
     ls -l /out
 
 ###############################################################################
+# Build stage: libvmaf + a decode-only ffmpeg for audit metrics.
+#
+# The distro ffmpeg is built without --enable-libvmaf, so it cannot score VMAF
+# at all - which leaves "is the transcode still as good as the source?" answered
+# by weaker proxies. Rebuilding the whole encoder stack to add one filter is slow
+# and fragile; instead this builds a small ffmpeg that only decodes and scores,
+# installed as /usr/local/bin/ffmpeg-vmaf. Encoding still uses the distro ffmpeg,
+# which keeps VAAPI, x265, SVT-AV1 and the rest exactly as packaged.
+#
+# Cost: a few minutes of build time and ~30MB in the final image.
+# The smoke test at the end fails the build if VMAF stops working, so an audit
+# can never silently fall back to a weaker metric because of a broken image.
+###############################################################################
+FROM ubuntu:26.04 AS vmaf
+ARG VMAF_VERSION=3.0.0
+ARG FFMPEG_VERSION=8.0.1
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      ca-certificates curl xz-utils build-essential nasm pkg-config \
+      meson ninja-build python3 libdav1d-dev libxxhash-dev; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*; \
+    mkdir -p /src; \
+    cd /src; \
+    curl -fsSLo vmaf.tar.gz \
+      "https://github.com/Netflix/vmaf/archive/refs/tags/v${VMAF_VERSION}.tar.gz"; \
+    tar -xzf vmaf.tar.gz; \
+    cd "vmaf-${VMAF_VERSION}/libvmaf"; \
+    meson setup build . --buildtype release --prefix=/usr/local --libdir=lib \
+      -Denable_tests=false -Denable_docs=false -Dbuilt_in_models=true; \
+    ninja -C build; \
+    ninja -C build install; \
+    cd /src; \
+    curl -fsSLo ffmpeg.tar.xz "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz"; \
+    tar -xf ffmpeg.tar.xz; \
+    cd "ffmpeg-${FFMPEG_VERSION}"; \
+    PKG_CONFIG_PATH=/usr/local/lib/pkgconfig ./configure \
+      --prefix=/usr/local \
+      --disable-doc --disable-debug --disable-network \
+      --enable-gpl --enable-libvmaf --enable-libdav1d \
+      --disable-shared --enable-static; \
+    make -j"$(nproc)"; \
+    make install; \
+    strip /usr/local/bin/ffmpeg; \
+    mkdir -p /out/bin /out/lib /out/share; \
+    cp /usr/local/bin/ffmpeg /out/bin/ffmpeg-vmaf; \
+    cp -a /usr/local/lib/libvmaf.so* /out/lib/; \
+    cp "/src/vmaf-${VMAF_VERSION}/model/vmaf_v0.6.1.json" /out/share/; \
+    ldconfig; \
+    echo '--- smoke test: the filter must load a model and produce a score ---'; \
+    cd /tmp; \
+    /usr/local/bin/ffmpeg -v error -f lavfi \
+      -i "testsrc2=size=320x240:rate=24000/1001:duration=3" -c:v mpeg4 -q:v 2 ref.mkv; \
+    /usr/local/bin/ffmpeg -v error -i ref.mkv -c:v mpeg4 -q:v 24 dist.mkv; \
+    /usr/local/bin/ffmpeg -v error -i dist.mkv -i ref.mkv \
+      -lavfi "[0:v][1:v]libvmaf=model=path=/out/share/vmaf_v0.6.1.json:log_fmt=json:log_path=/tmp/v.json" \
+      -f null -; \
+    grep -q pooled_metrics /tmp/v.json; \
+    ls -lh /out/bin/ffmpeg-vmaf /out/lib/libvmaf.so.3*
+
+###############################################################################
 FROM ubuntu:26.04
 
 LABEL org.opencontainers.image.title="CodeContainer" \
@@ -187,6 +249,9 @@ RUN set -eux; \
 #    Go itself comes from mise, per project.
 # =============================================================================
 COPY --from=gotools /out/gopls /out/goimports /out/dlv /usr/local/bin/
+COPY --from=vmaf /out/bin/ffmpeg-vmaf /usr/local/bin/ffmpeg-vmaf
+COPY --from=vmaf /out/lib/libvmaf.so.3 /out/lib/libvmaf.so.3.0.0 /usr/local/lib/
+COPY --from=vmaf /out/share/vmaf_v0.6.1.json /usr/local/share/vmaf/vmaf_v0.6.1.json
 
 # =============================================================================
 # 4. Rust -> mise. Only rust-analyzer is kept here, so Rust LSP support does not
@@ -295,9 +360,12 @@ COPY bin/pair /usr/local/bin/pair
 COPY bin/chromium /usr/local/bin/chromium
 COPY bin/ship /usr/local/bin/ship
 COPY bin/council /usr/local/bin/council
+COPY bin/discforge /usr/local/bin/discforge
 
 RUN set -eux; \
-    chmod 0755 /usr/local/bin/preview /usr/local/bin/agent-notes /usr/local/bin/tooling /usr/local/bin/pair /usr/local/bin/chromium /usr/local/bin/ship /usr/local/bin/council; \
+    chmod 0755 /usr/local/bin/preview /usr/local/bin/agent-notes /usr/local/bin/tooling /usr/local/bin/pair /usr/local/bin/chromium /usr/local/bin/ship /usr/local/bin/council /usr/local/bin/discforge /usr/local/bin/ffmpeg-vmaf; \
+    ldconfig; \
+    ffmpeg-vmaf -hide_banner -filters | grep -q libvmaf; \
     printf '\n[ -f /etc/bash.bashrc.d-codecontainer ] && . /etc/bash.bashrc.d-codecontainer\n' >> /etc/bash.bashrc; \
     printf '\n[ -f /etc/zsh/zshrc.d-codecontainer ] && . /etc/zsh/zshrc.d-codecontainer\n' >> /etc/zsh/zshrc; \
     mkdir -p /root/Projects; \

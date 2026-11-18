@@ -75,6 +75,18 @@ services:
       # killed build are always cleared.
       SCRATCH_WIPE_ON_START: "1"
 
+      # --- disc rips -> Jellyfin library (organize-rips skill) --------------
+      # Where ARM's finished rips appear, and where the library lives. Set these
+      # to match the mounts below; the skill refuses to guess, so a missing
+      # mount shows up as a clear error instead of files in the wrong place.
+      RIPS_IN: "/mnt/rips"
+      LIB_TV: "/mnt/library/tv"
+      LIB_MOVIES: "/mnt/library/movies"
+      # TMDB token, either a v3 key or a v4 read token. Prefer the file at
+      # ~/.config/discforge/tmdb_token (bind-mounted, never in git) and leave
+      # this empty; an env var here ends up in `docker inspect`.
+      TMDB_TOKEN: "${TMDB_TOKEN:-}"
+
     # --- tuning for ~5-10 agents running concurrently ("yolo" mode) ---------
     # Shared memory for parallel headless browsers.
     shm_size: "4gb"
@@ -132,6 +144,18 @@ services:
       # sshd authorized_keys only. GH_TOKEN is an environment variable above,
       # never a file in here.
       - "./secrets:/secrets:ro"
+
+      # -----------------------------------------------------------------------
+      # EDIT ME -- disc rips in, library out (organize-rips skill).
+      #
+      # ARM's output is INPUT ONLY: mount it :ro and treat that as a hard rule.
+      # The library paths must be the same directories Jellyfin reads, so an
+      # agent's finished file is immediately visible to the media server.
+      # Keep the re-encode scratch on the array or a pool with room for two
+      # copies of the biggest title.
+      # - "/mnt/user/rips:/mnt/rips:ro"
+      # - "/mnt/user/media/tv:/mnt/library/tv"
+      # - "/mnt/user/media/movies:/mnt/library/movies"
 
       # -----------------------------------------------------------------------
       # EDIT ME -- state + caches as bind mounts (no named volumes).

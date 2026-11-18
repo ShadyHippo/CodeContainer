@@ -1,0 +1,945 @@
+#!/usr/bin/env python3
+"""discforge - inspect, transcode and audit ripped disc titles for Jellyfin.
+
+Deliberately small and dependency-free (stdlib only). It does the deterministic
+work that is easy to get wrong by hand and expensive to get wrong in bulk:
+probing, interlace classification, encoding with a consistent filter chain, and
+auditing the result against its source before it is allowed into the library.
+
+Every judgement call (which title is an episode, which encoder, how hard to
+compress) is made by the caller and recorded in the sidecar next to the output,
+so a batch can be reviewed later without re-running anything.
+
+Subcommands:
+    probe      normalised source/output profile
+    classify   idet sampling -> progressive / telecined / interlaced-video
+    encode     build and run the ffmpeg command, write a job sidecar
+    audit      gate an output against its source (fps, interlace, VMAF/XPSNR)
+    tmdb       thin TMDB lookup for show/season/movie metadata and runtimes
+
+Exit codes: 0 ok / 1 audit failed / 2 usage or environment error.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shutil
+import statistics
+import subprocess
+import sys
+import tempfile
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+DEFAULT_VAAPI = "/dev/dri/renderD128"
+VMAF_BINARY_CANDIDATES = ("ffmpeg-vmaf", "ffmpeg")
+TOKEN_PATHS = (
+    Path.home() / ".config" / "discforge" / "tmdb_token",
+    Path.home() / ".config" / "discforge" / "tmdb_token.txt",
+)
+
+
+# --------------------------------------------------------------------------- #
+# helpers
+# --------------------------------------------------------------------------- #
+
+def die(msg: str, code: int = 2) -> "NoReturn":  # noqa: F821
+    print(f"discforge: {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def which(name: str) -> str:
+    path = shutil.which(name)
+    if not path:
+        die(f"required tool not found on PATH: {name}")
+    return path
+
+
+def run(cmd: list[str], *, capture: bool = True, timeout: int | None = None) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE if capture else None,
+            stderr=subprocess.PIPE if capture else None,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except FileNotFoundError:
+        die(f"command not found: {cmd[0]}")
+
+
+def ffprobe_json(path: str) -> dict:
+    proc = run([
+        which("ffprobe"), "-v", "error", "-print_format", "json",
+        "-show_format", "-show_streams", "-show_chapters", path,
+    ])
+    if proc.returncode != 0:
+        die(f"ffprobe failed on {path}: {proc.stderr.strip()[:400]}")
+    return json.loads(proc.stdout)
+
+
+def parse_rate(value: str | None) -> float | None:
+    if not value or value in ("0/0", "N/A"):
+        return None
+    if "/" in value:
+        num, den = value.split("/", 1)
+        try:
+            numf, denf = float(num), float(den)
+        except ValueError:
+            return None
+        return numf / denf if denf else None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def human_bytes(n: int | float | None) -> str:
+    if not n:
+        return "?"
+    step = 1024.0
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(n) < step:
+            return f"{n:.1f}{unit}"
+        n /= step
+    return f"{n:.1f}PB"
+
+
+def sha256_file(path: str, limit: int | None = None) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        remaining = limit
+        while True:
+            chunk = fh.read(1 << 20 if remaining is None else min(1 << 20, remaining))
+            if not chunk:
+                break
+            h.update(chunk)
+            if remaining is not None:
+                remaining -= len(chunk)
+                if remaining <= 0:
+                    break
+    return h.hexdigest()
+
+
+def quick_fingerprint(path: str) -> str:
+    """Cheap stable identity: size + head/tail hash. Survives mtime changes."""
+    size = os.path.getsize(path)
+    head = sha256_file(path, 8 << 20)
+    h = hashlib.sha256()
+    h.update(str(size).encode())
+    h.update(head.encode())
+    with open(path, "rb") as fh:
+        fh.seek(max(0, size - (8 << 20)))
+        h.update(hashlib.sha256(fh.read()).hexdigest().encode())
+    return h.hexdigest()[:32]
+
+
+def stream_kind(stream: dict) -> str:
+    return stream.get("codec_type", "?")
+
+
+def summarise_tracks(probe: dict) -> dict:
+    out = {"video": [], "audio": [], "subtitle": []}
+    for st in probe.get("streams", []):
+        kind = stream_kind(st)
+        if kind not in out:
+            continue
+        entry = {
+            "index": st.get("index"),
+            "codec": st.get("codec_name"),
+            "lang": (st.get("tags") or {}).get("language"),
+            "title": (st.get("tags") or {}).get("title"),
+            "default": bool((st.get("disposition") or {}).get("default")),
+        }
+        if kind == "video":
+            entry.update({
+                "width": st.get("width"),
+                "height": st.get("height"),
+                "sar": st.get("sample_aspect_ratio"),
+                "dar": st.get("display_aspect_ratio"),
+                "fps": parse_rate(st.get("avg_frame_rate")),
+                "field_order": st.get("field_order"),
+                "pix_fmt": st.get("pix_fmt"),
+                "bit_rate": int(st["bit_rate"]) if st.get("bit_rate") else None,
+            })
+        if kind == "audio":
+            entry.update({
+                "channels": st.get("channels"),
+                "sample_rate": st.get("sample_rate"),
+                "bit_rate": int(st["bit_rate"]) if st.get("bit_rate") else None,
+            })
+        out[kind].append(entry)
+    return out
+
+
+def pick_video(probe: dict) -> dict:
+    for st in probe.get("streams", []):
+        if stream_kind(st) == "video" and not (st.get("disposition") or {}).get("attached_pic"):
+            return st
+    die("no video stream found")
+
+
+# --------------------------------------------------------------------------- #
+# probe
+# --------------------------------------------------------------------------- #
+
+def profile(path: str) -> dict:
+    probe = ffprobe_json(path)
+    fmt = probe.get("format", {})
+    video = pick_video(probe)
+    tracks = summarise_tracks(probe)
+    chapters = probe.get("chapters", [])
+    return {
+        "path": os.path.abspath(path),
+        "size": int(fmt.get("size") or os.path.getsize(path)),
+        "duration": float(fmt.get("duration") or 0.0),
+        "container": fmt.get("format_name"),
+        "bit_rate": int(fmt["bit_rate"]) if fmt.get("bit_rate") else None,
+        "video": {
+            "codec": video.get("codec_name"),
+            "width": video.get("width"),
+            "height": video.get("height"),
+            "sar": video.get("sample_aspect_ratio"),
+            "dar": video.get("display_aspect_ratio"),
+            "fps": parse_rate(video.get("avg_frame_rate")),
+            "r_fps": parse_rate(video.get("r_frame_rate")),
+            "field_order": video.get("field_order"),
+            "pix_fmt": video.get("pix_fmt"),
+            "profile": video.get("profile"),
+            "bit_rate": int(video["bit_rate"]) if video.get("bit_rate") else None,
+        },
+        "tracks": tracks,
+        "chapters": len(chapters),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# classify
+# --------------------------------------------------------------------------- #
+
+IDET_REPEATED = re.compile(
+    r"Repeated Fields:\s+Neither:\s*(\d+)\s+Top:\s*(\d+)\s+Bottom:\s*(\d+)")
+IDET_SINGLE = re.compile(
+    r"Single frame detection:\s+TFF:\s*(\d+)\s+BFF:\s*(\d+)\s+Progressive:\s*(\d+)\s+Undetermined:\s*(\d+)")
+IDET_MULTI = re.compile(
+    r"Multi frame detection:\s+TFF:\s*(\d+)\s+BFF:\s*(\d+)\s+Progressive:\s*(\d+)\s+Undetermined:\s*(\d+)")
+
+
+def idet_window(path: str, offset: float, seconds: float, threads: int = 4) -> dict:
+    """Run idet over one window and return the raw counters."""
+    proc = run([
+        which("ffmpeg"), "-hide_banner", "-nostdin", "-v", "info",
+        "-ss", f"{offset:.3f}", "-t", f"{seconds:.3f}", "-i", path,
+        "-an", "-sn", "-dn", "-threads", str(threads),
+        "-vf", "idet", "-f", "null", "-",
+    ])
+    text = proc.stderr
+    acc = {"neither": 0, "top": 0, "bottom": 0,
+           "tff": 0, "bff": 0, "progressive": 0, "undetermined": 0,
+           "m_tff": 0, "m_bff": 0, "m_progressive": 0, "m_undetermined": 0}
+    for m in IDET_REPEATED.finditer(text):
+        acc["neither"] += int(m.group(1))
+        acc["top"] += int(m.group(2))
+        acc["bottom"] += int(m.group(3))
+    for m in IDET_SINGLE.finditer(text):
+        acc["tff"] += int(m.group(1))
+        acc["bff"] += int(m.group(2))
+        acc["progressive"] += int(m.group(3))
+        acc["undetermined"] += int(m.group(4))
+    for m in IDET_MULTI.finditer(text):
+        acc["m_tff"] += int(m.group(1))
+        acc["m_bff"] += int(m.group(2))
+        acc["m_progressive"] += int(m.group(3))
+        acc["m_undetermined"] += int(m.group(4))
+    if not (acc["progressive"] or acc["tff"] or acc["bff"] or acc["undetermined"]):
+        die(f"idet produced no statistics for {path} (is it decodable?)")
+    return acc
+
+
+def analyse_counters(counters: dict, fps: float | None) -> dict:
+    """Turn raw idet counters into ratios and a verdict.
+
+    Calibrated against real behaviour rather than the ideal: idet reports
+    'undetermined' for smooth content it cannot judge, and reports TFF on a
+    meaningful fraction of frames it merely finds ambiguous. Only near-total
+    TFF/BFF means true interlacing, so the band below is deliberately wide.
+    """
+    frames = counters["progressive"] + counters["tff"] + counters["bff"] + counters["undetermined"]
+    if not frames:
+        die("idet reported zero frames")
+    ratios = {
+        "progressive_ratio": counters["progressive"] / frames,
+        "undetermined_ratio": counters["undetermined"] / frames,
+        "repeated_field_ratio": (counters["top"] + counters["bottom"]) / frames,
+        "interlace_ratio": (counters["tff"] + counters["bff"]) / frames,
+    }
+
+    if ratios["repeated_field_ratio"] >= 0.15:
+        verdict, action = "telecined", "ivtc"
+        confidence = "high" if ratios["repeated_field_ratio"] >= 0.30 else "medium"
+    elif ratios["interlace_ratio"] >= 0.85:
+        verdict, action = "interlaced-video", "deinterlace"
+        confidence = "high" if ratios["interlace_ratio"] >= 0.95 else "medium"
+    elif ratios["repeated_field_ratio"] >= 0.05 or ratios["interlace_ratio"] >= 0.60:
+        verdict, action, confidence = "mixed", "inspect", "low"
+    else:
+        verdict, action, confidence = "progressive", "none", "medium"
+        if ratios["progressive_ratio"] >= 0.50:
+            confidence = "high"
+
+    # 23.976/24p is not a broadcast interlaced format; with no repeated fields,
+    # that is combing on sharp graphics, not interlacing.
+    if verdict != "telecined" and fps and 0 < fps < 24.5 and ratios["repeated_field_ratio"] < 0.05:
+        verdict, action, confidence = "progressive", "none", "medium"
+
+    return {**ratios, "verdict": verdict, "action": action, "confidence": confidence}
+
+
+def classify(path: str, samples: int = 3, seconds: float = 60.0) -> dict:
+    prof = profile(path)
+    duration = prof["duration"] or 0.0
+    win = min(seconds, max(10.0, duration / (samples + 2)))
+    offsets = []
+    for i in range(samples):
+        # spread across the body, avoiding the first and last 10%
+        frac = 0.15 + (0.70 * i / max(1, samples - 1)) if samples > 1 else 0.5
+        offsets.append(max(0.0, min(duration - win, duration * frac)))
+
+    totals = {"neither": 0, "top": 0, "bottom": 0, "tff": 0, "bff": 0,
+              "progressive": 0, "undetermined": 0, "m_tff": 0, "m_bff": 0,
+              "m_progressive": 0, "m_undetermined": 0}
+    for off in offsets:
+        acc = idet_window(path, off, win)
+        for key in totals:
+            totals[key] += acc[key]
+
+    analysed = analyse_counters(totals, prof["video"]["fps"])
+    return {
+        "path": os.path.abspath(path),
+        "duration": duration,
+        "fps": prof["video"]["fps"],
+        "field_order": prof["video"]["field_order"],
+        "windows": len(offsets),
+        "frames_sampled": sum(totals[k] for k in ("progressive", "tff", "bff", "undetermined")),
+        "progressive_ratio": round(analysed["progressive_ratio"], 4),
+        "repeated_field_ratio": round(analysed["repeated_field_ratio"], 4),
+        "interlace_ratio": round(analysed["interlace_ratio"], 4),
+        "verdict": analysed["verdict"],
+        "action": analysed["action"],
+        "confidence": analysed["confidence"],
+        "counters": totals,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# encode
+# --------------------------------------------------------------------------- #
+
+FILTER_CHAINS = {
+    "none": [],
+    "ivtc": ["fieldmatch=order=auto:combmatch=full:combpel=80", "decimate"],
+    "deinterlace": ["bwdif=mode=send_frame:parity=auto:deint=interlaced"],
+}
+
+DENOISE = {
+    "none": [],
+    "light": ["hqdn3d=1.5:1.0:6.0:4.5"],
+    "medium": ["hqdn3d=2.0:1.5:8.0:6.0"],
+}
+
+
+def build_encode_command(
+    src: str,
+    dst: str,
+    *,
+    action: str,
+    encoder: str,
+    quality: int,
+    preset: str | None,
+    denoise: str,
+    audio: str,
+    vaapi_device: str,
+    threads: int | None,
+    extra_vf: list[str] | None = None,
+    metadata: dict[str, str] | None = None,
+    remux: bool = False,
+) -> list[str]:
+    cmd = [which("ffmpeg"), "-hide_banner", "-nostdin", "-y", "-i", src]
+
+    video_filters = list(FILTER_CHAINS.get(action, []))
+    video_filters += list(DENOISE.get(denoise, []))
+    if extra_vf:
+        video_filters += extra_vf
+
+    if remux:
+        cmd += ["-map", "0:v:0", "-map", "0:a?", "-map", "0:s?", "-map_chapters", "0",
+                "-c", "copy"]
+    else:
+        cmd += ["-map", "0:v:0", "-map", "0:a?", "-map", "0:s?", "-map_chapters", "0"]
+
+        if encoder == "av1_vaapi":
+            cmd += ["-vaapi_device", vaapi_device]
+            chain = video_filters + ["format=nv12", "hwupload"]
+            cmd += ["-vf", ",".join(chain)]
+            cmd += ["-c:v", "av1_vaapi", "-rc_mode", "ICQ",
+                    "-global_quality", str(quality), "-b_depth", "1"]
+        elif encoder == "svtav1":
+            chain = video_filters + ["format=yuv420p"]
+            cmd += ["-vf", ",".join(chain)]
+            cmd += ["-c:v", "libsvtav1", "-crf", str(quality),
+                    "-preset", preset or "6"]
+        elif encoder == "x265":
+            chain = video_filters + ["format=yuv420p"]
+            cmd += ["-vf", ",".join(chain)]
+            cmd += ["-c:v", "libx265", "-crf", str(quality),
+                    "-preset", preset or "medium",
+                    "-x265-params", "log-level=error"]
+        elif encoder == "x264":
+            chain = video_filters + ["format=yuv420p"]
+            cmd += ["-vf", ",".join(chain)]
+            cmd += ["-c:v", "libx264", "-crf", str(quality),
+                    "-preset", preset or "medium"]
+        else:
+            die(f"unknown encoder: {encoder}")
+
+        if audio == "copy":
+            cmd += ["-c:a", "copy"]
+        elif audio.startswith("eac3"):
+            chan = audio.split(":", 1)[1] if ":" in audio else "5.1"
+            cmd += ["-c:a", "eac3", "-b:a", "640k", "-ac", str(chan_channels(chan))]
+        elif audio.startswith("ac3"):
+            chan = audio.split(":", 1)[1] if ":" in audio else "5.1"
+            cmd += ["-c:a", "ac3", "-b:a", "448k", "-ac", str(chan_channels(chan))]
+        elif audio.startswith("aac"):
+            chan = audio.split(":", 1)[1] if ":" in audio else "2"
+            cmd += ["-c:a", "aac", "-b:a", "192k", "-ac", str(chan_channels(chan))]
+        else:
+            die(f"unknown audio policy: {audio}")
+
+        cmd += ["-c:s", "copy"]
+
+    if threads:
+        cmd += ["-threads", str(threads)]
+    for key, value in (metadata or {}).items():
+        cmd += ["-metadata", f"{key}={value}"]
+    cmd += [dst]
+    return cmd
+
+
+def chan_channels(spec: str) -> int:
+    mapping = {"1": 1, "2": 2, "2.0": 2, "6": 6, "5.1": 6, "8": 8, "7.1": 8}
+    if spec not in mapping:
+        die(f"unsupported channel spec: {spec}")
+    return mapping[spec]
+
+
+def cmd_encode(args: argparse.Namespace) -> int:
+    if not os.path.isfile(args.src):
+        die(f"no such file: {args.src}")
+    if os.path.abspath(args.src) == os.path.abspath(args.dst):
+        die("refusing to overwrite the source")
+    os.makedirs(os.path.dirname(os.path.abspath(args.dst)), exist_ok=True)
+
+    action = args.action
+    if action == "auto":
+        verdict = classify(args.src, samples=args.samples)
+        action = verdict["action"]
+        print(f"classify: {verdict['verdict']} ({verdict['confidence']}) -> {action}",
+              file=sys.stderr)
+        if action == "inspect":
+            die("classification is ambiguous; rerun with --action none|ivtc|deinterlace")
+
+    cmd = build_encode_command(
+        args.src, args.dst,
+        action="none" if args.remux else action,
+        encoder=args.encoder, quality=args.quality, preset=args.preset,
+        denoise=args.denoise, audio=args.audio, vaapi_device=args.vaapi_device,
+        threads=args.threads, extra_vf=args.vf, metadata=dict(
+            m.split("=", 1) for m in (args.meta or [])),
+        remux=args.remux,
+    )
+
+    sidecar = {
+        "version": 1,
+        "source": profile(args.src),
+        "fingerprint": quick_fingerprint(args.src),
+        "action": action,
+        "denoise": args.denoise,
+        "encoder": "copy" if args.remux else args.encoder,
+        "quality": args.quality,
+        "preset": args.preset,
+        "audio": args.audio,
+        "command": cmd,
+    }
+
+    if args.dry_run:
+        print(" ".join(cmd))
+        print(json.dumps(sidecar, indent=2))
+        return 0
+
+    print("discforge: encoding ->", args.dst, file=sys.stderr)
+    proc = run(cmd, capture=False)
+    if proc.returncode != 0:
+        die(f"ffmpeg failed with exit code {proc.returncode}", 1)
+
+    sidecar["output"] = profile(args.dst)
+    sidecar_path = args.sidecar or f"{args.dst}.job.json"
+    Path(sidecar_path).write_text(json.dumps(sidecar, indent=2) + "\n")
+    print(f"discforge: wrote sidecar {sidecar_path}", file=sys.stderr)
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# audit
+# --------------------------------------------------------------------------- #
+
+def vmaf_binary() -> str | None:
+    for name in VMAF_BINARY_CANDIDATES:
+        path = shutil.which(name)
+        if not path:
+            continue
+        proc = run([path, "-hide_banner", "-filters"])
+        if "libvmaf" in proc.stdout:
+            return path
+    return None
+
+
+def count_frames(path: str) -> int:
+    proc = run([
+        which("ffprobe"), "-v", "error", "-select_streams", "v:0",
+        "-count_frames", "-show_entries", "stream=nb_read_frames",
+        "-of", "default=nokey=1:noprint_wrappers=1", path,
+    ])
+    try:
+        return int(proc.stdout.strip())
+    except ValueError:
+        die(f"could not count frames in {path}: {proc.stderr.strip()[:200]}")
+
+
+def percentile(values: list[float], pct: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    pos = (len(ordered) - 1) * pct / 100.0
+    low, high = int(pos), min(int(pos) + 1, len(ordered) - 1)
+    return ordered[low] + (ordered[high] - ordered[low]) * (pos - low)
+
+
+def vmaf_model_arg() -> str:
+    """Explicit model file when present: reproducible, and libvmaf 3.x does not
+    reliably expose the built-in model to the ffmpeg filter."""
+    explicit = os.environ.get("DISCFORGE_VMAF_MODEL")
+    if explicit:
+        return f"model=path={explicit}"
+    for candidate in (
+        "/usr/local/share/vmaf/vmaf_v0.6.1.json",
+        "/opt/vmaf/share/vmaf/vmaf_v0.6.1.json",
+    ):
+        if os.path.isfile(candidate):
+            return f"model=path={candidate}"
+    return "model=version=vmaf_v0.6.1"
+
+
+def run_vmaf(ref_filters: str, out_path: str, src_path: str, subsample: int) -> dict | None:
+    binary = vmaf_binary()
+    if not binary:
+        return None
+    log_fd, log_path = tempfile.mkstemp(suffix=".vmaf.json")
+    os.close(log_fd)
+    chain_parts = []
+    chain_parts.append("[0:v]setpts=PTS-STARTPTS,format=yuv420p[dist]")
+    if ref_filters:
+        chain_parts.append(f"[1:v]setpts=PTS-STARTPTS,{ref_filters},format=yuv420p[ref]")
+    else:
+        chain_parts.append("[1:v]setpts=PTS-STARTPTS,format=yuv420p[ref]")
+    chain_parts.append(
+        f"[dist][ref]libvmaf={vmaf_model_arg()}:n_threads=8:"
+        f"n_subsample={max(1, subsample)}:log_fmt=json:log_path={log_path}")
+    proc = run([
+        binary, "-hide_banner", "-nostdin", "-v", "error",
+        "-i", out_path, "-i", src_path,
+        "-lavfi", ";".join(chain_parts), "-f", "null", "-",
+    ])
+    if proc.returncode != 0:
+        print(f"discforge: vmaf failed: {proc.stderr.strip()[:300]}", file=sys.stderr)
+        return None
+    try:
+        data = json.loads(Path(log_path).read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    finally:
+        try:
+            os.unlink(log_path)
+        except OSError:
+            pass
+
+    frames = [f["metrics"]["vmaf"] for f in data.get("frames", []) if "vmaf" in f.get("metrics", {})]
+    pooled = (data.get("pooled_metrics") or {}).get("vmaf", {})
+    return {
+        "mean": pooled.get("mean", statistics.fmean(frames) if frames else None),
+        "min": pooled.get("min", min(frames) if frames else None),
+        "p1": percentile(frames, 1),
+        "p5": percentile(frames, 5),
+        "frames": len(frames),
+        "model": "vmaf_v0.6.1",
+    }
+
+
+def run_xpsnr(out_path: str, src_path: str, ref_filters: str) -> dict | None:
+    chain = "[0:v]setpts=PTS-STARTPTS,format=yuv420p[dist]"
+    if ref_filters:
+        chain += f";[1:v]setpts=PTS-STARTPTS,{ref_filters},format=yuv420p[ref]"
+    else:
+        chain += ";[1:v]setpts=PTS-STARTPTS,format=yuv420p[ref]"
+    chain += ";[dist][ref]xpsnr"
+    proc = run([
+        which("ffmpeg"), "-hide_banner", "-nostdin", "-v", "info",
+        "-i", out_path, "-i", src_path, "-lavfi", chain, "-f", "null", "-",
+    ])
+    m = re.search(r"XPSNR\s+y:\s*([0-9.]+)\s+u:\s*([0-9.]+)\s+v:\s*([0-9.]+)", proc.stderr)
+    if not m:
+        return None
+    return {"y": float(m.group(1)), "u": float(m.group(2)), "v": float(m.group(3))}
+
+
+def detect_freezes(path: str, min_seconds: float) -> list[dict]:
+    proc = run([
+        which("ffmpeg"), "-hide_banner", "-nostdin", "-v", "info",
+        "-i", path, "-an", "-vf", f"freezedetect=n=-60dB:d={min_seconds}",
+        "-f", "null", "-",
+    ])
+    freezes, start = [], None
+    for line in proc.stderr.splitlines():
+        m = re.search(r"freeze_start:\s*([0-9.]+)", line)
+        if m:
+            start = float(m.group(1))
+        m = re.search(r"freeze_duration:\s*([0-9.]+)", line)
+        if m and start is not None:
+            freezes.append({"start": start, "duration": float(m.group(1))})
+    return freezes
+
+
+def cmd_audit(args: argparse.Namespace) -> int:
+    if not os.path.isfile(args.out):
+        die(f"no such output: {args.out}")
+
+    sidecar = {}
+    job_path = Path(f"{args.out}.job.json")
+    if job_path.is_file():
+        try:
+            sidecar = json.loads(job_path.read_text())
+        except json.JSONDecodeError:
+            sidecar = {}
+
+    src_profile = profile(args.src)
+    out_profile = profile(args.out)
+
+    src_frames = count_frames(args.src)
+    out_frames = count_frames(args.out)
+    out_fps = out_profile["video"]["fps"] or 0
+    src_fps = src_profile["video"]["fps"] or 0
+
+    action = args.action or sidecar.get("action") or "none"
+    ref_filters = args.ref_filters or ""
+    if not ref_filters and action in FILTER_CHAINS:
+        ref_filters = ",".join(FILTER_CHAINS[action])
+
+    reasons: list[str] = []
+    metrics: dict = {
+        "source_frames": src_frames,
+        "output_frames": out_frames,
+        "source_fps": round(src_fps, 3),
+        "output_fps": round(out_fps, 3),
+        "source_duration": round(src_profile["duration"], 3),
+        "output_duration": round(out_profile["duration"], 3),
+        "size_in": src_profile["size"],
+        "size_out": out_profile["size"],
+        "action": action,
+    }
+
+    # --- expected frame count ------------------------------------------------
+    if action == "ivtc":
+        expected = round(src_frames * 0.8)
+    else:
+        expected = src_frames
+    tolerance = max(2, int(expected * 0.002))
+    metrics["expected_frames"] = expected
+    metrics["frame_delta"] = out_frames - expected
+    if abs(out_frames - expected) > tolerance:
+        reasons.append(
+            f"frame count {out_frames} differs from expected {expected} "
+            f"(tolerance {tolerance})")
+
+    # --- fps ----------------------------------------------------------------
+    if abs(out_fps - src_fps) > 0.02 and action != "ivtc":
+        reasons.append(f"fps {out_fps:.3f} != source {src_fps:.3f}")
+    if action == "ivtc" and abs(out_fps - 24000 / 1001) > 0.02 and abs(out_fps - 25.0) > 0.02:
+        reasons.append(f"IVTC output fps {out_fps:.3f} is neither 23.976 nor 25")
+
+    # --- geometry -----------------------------------------------------------
+    if (out_profile["video"]["width"], out_profile["video"]["height"]) != (
+            src_profile["video"]["width"], src_profile["video"]["height"]):
+        reasons.append("resolution changed")
+    metrics["sar"] = {"in": src_profile["video"]["sar"], "out": out_profile["video"]["sar"]}
+
+    # --- residual interlacing ----------------------------------------------
+    idet = idet_window(args.out, 0, min(120.0, out_profile["duration"] or 120.0))
+    interlace = analyse_counters(idet, out_fps)
+    metrics["output_interlace"] = {
+        "progressive_ratio": round(interlace["progressive_ratio"], 4),
+        "repeated_field_ratio": round(interlace["repeated_field_ratio"], 4),
+        "interlace_ratio": round(interlace["interlace_ratio"], 4),
+        "verdict": interlace["verdict"],
+    }
+    if interlace["verdict"] in ("telecined", "interlaced-video"):
+        reasons.append(
+            f"output still reads {interlace['verdict']} "
+            f"(interlace {interlace['interlace_ratio']:.2f}, "
+            f"repeated fields {interlace['repeated_field_ratio']:.2f})")
+    elif interlace["verdict"] == "mixed":
+        metrics["output_interlace_warning"] = (
+            "ambiguous interlace statistics; verify by eye before deleting the source")
+
+    # --- duration -----------------------------------------------------------
+    dur_delta = abs(out_profile["duration"] - src_profile["duration"])
+    metrics["duration_delta"] = round(dur_delta, 3)
+    if dur_delta > 0.75:
+        reasons.append(f"duration differs by {dur_delta:.2f}s")
+
+    # --- tracks -------------------------------------------------------------
+    for kind in ("audio", "subtitle"):
+        n_in = len(src_profile["tracks"][kind])
+        n_out = len(out_profile["tracks"][kind])
+        metrics[f"{kind}_tracks"] = {"in": n_in, "out": n_out}
+        if n_out < n_in:
+            reasons.append(f"{kind} tracks dropped: {n_in} -> {n_out}")
+
+    # --- freezes ------------------------------------------------------------
+    freezes = detect_freezes(args.out, args.freeze_seconds)
+    metrics["freezes"] = freezes
+    if freezes:
+        reasons.append(f"{len(freezes)} freeze(s) >= {args.freeze_seconds}s in output")
+
+    # --- quality ------------------------------------------------------------
+    vmaf = None
+    vmaf_attempted = not args.no_vmaf
+    if vmaf_attempted:
+        vmaf = run_vmaf(ref_filters, args.out, args.src, args.subsample)
+    if vmaf:
+        metrics["vmaf"] = {k: (round(v, 3) if isinstance(v, float) else v) for k, v in vmaf.items()}
+        if args.vmaf_min is not None and vmaf["mean"] < args.vmaf_min:
+            reasons.append(f"VMAF mean {vmaf['mean']:.2f} < {args.vmaf_min}")
+        if args.vmaf_p1_min is not None and vmaf["p1"] < args.vmaf_p1_min:
+            reasons.append(f"VMAF p1 {vmaf['p1']:.2f} < {args.vmaf_p1_min}")
+    else:
+        if vmaf_attempted:
+            metrics["vmaf_error"] = "libvmaf ran but produced no score (frame mismatch or bad filter chain)"
+        xpsnr = run_xpsnr(args.out, args.src, ref_filters)
+        if xpsnr:
+            metrics["xpsnr"] = {k: round(v, 3) for k, v in xpsnr.items()}
+            if args.xpsnr_min is not None and xpsnr["y"] < args.xpsnr_min:
+                reasons.append(f"XPSNR y {xpsnr['y']:.2f} < {args.xpsnr_min}")
+        elif not vmaf_attempted:
+            reasons.append("no quality metric was requested or available")
+        else:
+            reasons.append("no quality metric could be computed (VMAF and XPSNR both failed)")
+
+    verdict = {
+        "pass": not reasons,
+        "reasons": reasons,
+        "metrics": metrics,
+        "source": args.src,
+        "output": args.out,
+    }
+    if args.json:
+        Path(args.json).write_text(json.dumps(verdict, indent=2) + "\n")
+
+    print(json.dumps(verdict, indent=2))
+    return 0 if verdict["pass"] else 1
+
+
+# --------------------------------------------------------------------------- #
+# tmdb
+# --------------------------------------------------------------------------- #
+
+def tmdb_token() -> str:
+    token = os.environ.get("TMDB_TOKEN") or os.environ.get("TMDB_API_KEY")
+    if token:
+        return token.strip()
+    for path in TOKEN_PATHS:
+        if path.is_file():
+            return path.read_text().strip()
+    die("no TMDB token: set TMDB_TOKEN, or write one to ~/.config/discforge/tmdb_token")
+
+
+def tmdb_get(path: str, params: dict | None = None) -> dict:
+    token = tmdb_token()
+    query = urllib.parse.urlencode(params or {})
+    url = f"https://api.themoviedb.org/3{path}"
+    if query:
+        url += f"?{query}"
+    headers = {"Accept": "application/json"}
+    # v4 read tokens are JWTs; v3 keys are 32-char hex and go in the query
+    if token.count(".") == 2:
+        headers["Authorization"] = f"Bearer {token}"
+    else:
+        url += ("&" if query else "?") + urllib.parse.urlencode({"api_key": token})
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:  # noqa: F821
+        detail = exc.read().decode(errors="replace")[:300]
+        die(f"TMDB {exc.code}: {detail}")
+    except urllib.error.URLError as exc:  # noqa: F821
+        die(f"TMDB unreachable: {exc.reason}")
+
+
+def cmd_tmdb(args: argparse.Namespace) -> int:
+    if args.kind == "show":
+        data = tmdb_get("/search/tv", {"query": args.query, "year": args.year} if args.year
+                        else {"query": args.query})
+        results = [{
+            "id": r["id"], "name": r.get("name"), "first_air_date": r.get("first_air_date"),
+            "overview": (r.get("overview") or "")[:200],
+        } for r in data.get("results", [])[:10]]
+        print(json.dumps(results, indent=2))
+        return 0
+
+    if args.kind == "season":
+        if args.show_id is None or args.number is None:
+            die("season needs --show-id and --number")
+        data = tmdb_get(f"/tv/{args.show_id}/season/{args.number}")
+        episodes = [{
+            "episode": e.get("episode_number"),
+            "name": e.get("name"),
+            "runtime": e.get("runtime"),
+            "air_date": e.get("air_date"),
+        } for e in data.get("episodes", [])]
+        print(json.dumps({
+            "show_id": args.show_id, "season": args.number,
+            "name": data.get("name"), "episodes": episodes,
+        }, indent=2))
+        return 0
+
+    if args.kind == "movie":
+        data = tmdb_get("/search/movie", {"query": args.query, "year": args.year} if args.year
+                        else {"query": args.query})
+        results = [{
+            "id": r["id"], "title": r.get("title"), "release_date": r.get("release_date"),
+        } for r in data.get("results", [])[:10]]
+        print(json.dumps(results, indent=2))
+        return 0
+
+    die(f"unknown tmdb kind: {args.kind}")
+
+
+# --------------------------------------------------------------------------- #
+# cli
+# --------------------------------------------------------------------------- #
+
+def cmd_probe(args: argparse.Namespace) -> int:
+    data = profile(args.file)
+    if args.json:
+        print(json.dumps(data, indent=2))
+        return 0
+    v = data["video"]
+    print(f"{data['path']}")
+    print(f"  {human_bytes(data['size'])}  {data['duration'] / 60:.1f} min  "
+          f"{data['container']}  {human_bytes((data['bit_rate'] or 0) / 8)}/s")
+    fps = v["fps"] or 0.0
+    print(f"  video: {v['codec']} {v['width']}x{v['height']} sar={v['sar']} dar={v['dar']} "
+          f"{fps:.3f}fps {v['pix_fmt']} field_order={v['field_order']}")
+    for kind in ("audio", "subtitle"):
+        for t in data["tracks"][kind]:
+            extra = f" {t['channels']}ch" if kind == "audio" else ""
+            print(f"  {kind}: {t['codec']}{extra} lang={t['lang']} "
+                  f"default={t['default']} {t['title'] or ''}".rstrip())
+    if data["chapters"]:
+        print(f"  chapters: {data['chapters']}")
+    return 0
+
+
+def cmd_classify(args: argparse.Namespace) -> int:
+    data = classify(args.file, samples=args.samples, seconds=args.seconds)
+    print(json.dumps(data, indent=2))
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="discforge", description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("probe", help="normalised profile of a file")
+    p.add_argument("file")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_probe)
+
+    p = sub.add_parser("classify", help="idet sampling -> source verdict")
+    p.add_argument("file")
+    p.add_argument("--samples", type=int, default=3)
+    p.add_argument("--seconds", type=float, default=60.0)
+    p.set_defaults(func=cmd_classify)
+
+    p = sub.add_parser("encode", help="transcode with a recorded filter chain")
+    p.add_argument("src")
+    p.add_argument("dst")
+    p.add_argument("--action", default="auto",
+                   choices=["auto", "none", "ivtc", "deinterlace"])
+    p.add_argument("--encoder", default="av1_vaapi",
+                   choices=["av1_vaapi", "svtav1", "x265", "x264"])
+    p.add_argument("--quality", type=int, default=26,
+                   help="ICQ for av1_vaapi, CRF for software encoders")
+    p.add_argument("--preset", default=None)
+    p.add_argument("--denoise", default="none", choices=list(DENOISE))
+    p.add_argument("--audio", default="copy",
+                   help="copy | eac3:5.1 | ac3:5.1 | aac:2")
+    p.add_argument("--remux", action="store_true", help="copy streams, recontainer only")
+    p.add_argument("--vf", action="append", default=None, help="extra video filters")
+    p.add_argument("--meta", action="append", default=None, help="key=value metadata")
+    p.add_argument("--vaapi-device", default=DEFAULT_VAAPI)
+    p.add_argument("--threads", type=int, default=None)
+    p.add_argument("--sidecar", default=None)
+    p.add_argument("--samples", type=int, default=3, help="classify samples when --action auto")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(func=cmd_encode)
+
+    p = sub.add_parser("audit", help="gate an output against its source")
+    p.add_argument("src")
+    p.add_argument("out")
+    p.add_argument("--action", default=None, choices=list(FILTER_CHAINS),
+                   help="filter chain used for encoding (default: from sidecar)")
+    p.add_argument("--ref-filters", default=None,
+                   help="filters to apply to the reference before comparison")
+    p.add_argument("--vmaf-min", type=float, default=None)
+    p.add_argument("--vmaf-p1-min", type=float, default=None)
+    p.add_argument("--xpsnr-min", type=float, default=None)
+    p.add_argument("--subsample", type=int, default=4)
+    p.add_argument("--no-vmaf", action="store_true")
+    p.add_argument("--freeze-seconds", type=float, default=2.0)
+    p.add_argument("--json", default=None)
+    p.set_defaults(func=cmd_audit)
+
+    p = sub.add_parser("tmdb", help="TMDB lookups")
+    p.add_argument("kind", choices=["show", "season", "movie"])
+    p.add_argument("query", nargs="?")
+    p.add_argument("--year", default=None)
+    p.add_argument("--show-id", type=int, default=None)
+    p.add_argument("--number", type=int, default=None)
+    p.set_defaults(func=cmd_tmdb)
+
+    args = parser.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
