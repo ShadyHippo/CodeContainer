@@ -523,6 +523,7 @@ def cmd_encode(args: argparse.Namespace) -> int:
         "fingerprint": quick_fingerprint(args.src),
         "action": "none" if args.remux else action,
         "denoise": args.denoise,
+        "vf": list(args.vf or []),
         "encoder": "copy" if args.remux else args.encoder,
         "quality": args.quality,
         "preset": args.preset,
@@ -622,8 +623,8 @@ def materialise_reference(src_path: str, ref_filters: str) -> str | None:
     os.close(fd)
     proc = run([
         which("ffmpeg"), "-hide_banner", "-nostdin", "-v", "error", "-y",
-        "-i", src_path, "-an", "-sn", "-dn",
-        "-vf", ref_filters,
+        "-i", src_path, "-map", "0:v:0", "-an", "-sn", "-dn",
+        "-vf", ref_filters, "-pix_fmt", "yuv420p",
         "-c:v", "libx264", "-crf", "6", "-preset", "ultrafast",
         path,
     ])
@@ -652,16 +653,18 @@ def run_vmaf(ref_filters: str, out_path: str, src_path: str, subsample: int) -> 
     chain_parts.append(
         f"[dist][ref]libvmaf={vmaf_model_arg()}:n_threads=8:"
         f"n_subsample={max(1, subsample)}:log_fmt=json:log_path={log_path}")
-    proc = run([
-        binary, "-hide_banner", "-nostdin", "-v", "error",
-        "-i", out_path, "-i", ref_path or src_path,
-        "-lavfi", ";".join(chain_parts), "-f", "null", "-",
-    ])
-    if ref_path:
-        try:
-            os.unlink(ref_path)
-        except OSError:
-            pass
+    try:
+        proc = run([
+            binary, "-hide_banner", "-nostdin", "-v", "error",
+            "-i", out_path, "-i", ref_path or src_path,
+            "-lavfi", ";".join(chain_parts), "-f", "null", "-",
+        ])
+    finally:
+        if ref_path:
+            try:
+                os.unlink(ref_path)
+            except OSError:
+                pass
     if proc.returncode != 0:
         print(f"discforge: vmaf failed: {proc.stderr.strip()[:300]}", file=sys.stderr)
         return None
@@ -696,16 +699,18 @@ def run_xpsnr(out_path: str, src_path: str, ref_filters: str) -> dict | None:
     chain = "[0:v]setpts=PTS-STARTPTS,format=yuv420p[dist]"
     chain += ";[1:v]setpts=PTS-STARTPTS,format=yuv420p[ref]"
     chain += ";[dist][ref]xpsnr"
-    proc = run([
-        which("ffmpeg"), "-hide_banner", "-nostdin", "-v", "info",
-        "-i", out_path, "-i", ref_path or src_path, "-lavfi", chain,
-        "-f", "null", "-",
-    ])
-    if ref_path:
-        try:
-            os.unlink(ref_path)
-        except OSError:
-            pass
+    try:
+        proc = run([
+            which("ffmpeg"), "-hide_banner", "-nostdin", "-v", "info",
+            "-i", out_path, "-i", ref_path or src_path, "-lavfi", chain,
+            "-f", "null", "-",
+        ])
+    finally:
+        if ref_path:
+            try:
+                os.unlink(ref_path)
+            except OSError:
+                pass
     m = re.search(r"XPSNR\s+y:\s*([0-9.]+|inf)\s+u:\s*([0-9.]+|inf)\s+v:\s*([0-9.]+|inf)",
                   proc.stderr)
     if not m:
@@ -782,6 +787,9 @@ def cmd_audit(args: argparse.Namespace) -> int:
     if not ref_filters and action in FILTER_CHAINS:
         chain = list(FILTER_CHAINS[action])
         chain += list(DENOISE.get(sidecar.get("denoise") or "none", []))
+        # Any --vf the encode applied is part of the chain too; omitting it
+        # would compare against a reference that never had the filter.
+        chain += list(sidecar.get("vf") or [])
         ref_filters = ",".join(chain)
 
     reasons: list[str] = []
@@ -801,10 +809,11 @@ def cmd_audit(args: argparse.Namespace) -> int:
     # Derive from the fps ratio rather than assuming 3:2. 29.97->23.976 is 0.8x,
     # but PAL euro-pulldown is 25->25 (1.0x) and a hardcoded 0.8 would fail
     # every PAL title.
-    # 3:2 pulldown only exists on 29.97/30 sources; decimate removes a fifth of
-    # the frames unconditionally, so IVTC on 23.976/24/25 is a mistake that
-    # producing 19.2/20 fps must be caught for. Derive the expectation from the
-    # intended factor, never from the observed rate.
+    # 3:2 pulldown only exists on 29.97/30 sources, and decimate drops a fifth
+    # of the frames unconditionally. So IVTC on a 23.976/24/25 source produces
+    # 19.2/20 fps and is always a mistake: expect 1.0x there, which makes the
+    # frame count catch it. Derive the factor from the source rate, never from
+    # the observed output rate.
     if action in ("ivtc", "ivtc_hybrid"):
         factor = 0.8 if 29.0 <= src_fps <= 30.5 else 1.0
         expected = round(src_frames * factor)
@@ -814,8 +823,8 @@ def cmd_audit(args: argparse.Namespace) -> int:
     tolerance = max(2, int(expected * 0.002))
     metrics["expected_frames"] = expected
     metrics["frame_delta"] = out_frames - expected
-    if not out_fps:
-        metrics["frame_check"] = "skipped (output reports no frame rate)"
+    if action in ("ivtc", "ivtc_hybrid") and not src_fps:
+        metrics["frame_check"] = "skipped (source reports no frame rate)"
     elif abs(out_frames - expected) > tolerance:
         reasons.append(
             f"frame count {out_frames} differs from expected {expected} "
