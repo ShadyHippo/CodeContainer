@@ -82,9 +82,10 @@ services:
       RIPS_IN: "/mnt/rips"
       LIB_TV: "/mnt/library/tv"
       LIB_MOVIES: "/mnt/library/movies"
-      # TMDB token, either a v3 key or a v4 read token. Prefer the file at
-      # ~/.config/discforge/tmdb_token (bind-mounted, never in git) and leave
-      # this empty; an env var here ends up in `docker inspect`.
+      # TMDB token, either a v3 key or a v4 read token. Leave this empty and
+      # use ~/.config/discforge/tmdb_token instead (bind-mounted, never in git);
+      # anything set here is visible in `docker inspect`. Setting it here is
+      # supported, just less private.
       TMDB_TOKEN: "${TMDB_TOKEN:-}"
 
     # --- tuning for ~5-10 agents running concurrently ("yolo" mode) ---------

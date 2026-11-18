@@ -17,7 +17,8 @@ Subcommands:
     audit      gate an output against its source (fps, interlace, VMAF/XPSNR)
     tmdb       thin TMDB lookup for show/season/movie metadata and runtimes
 
-Exit codes: 0 ok / 1 audit failed / 2 usage or environment error.
+Exit codes: 0 ok / 1 encode or audit failed the gate / 2 usage or environment
+error (missing tool, unreadable file, bad arguments).
 """
 
 from __future__ import annotations
@@ -82,6 +83,17 @@ def ffprobe_json(path: str) -> dict:
     if proc.returncode != 0:
         die(f"ffprobe failed on {path}: {proc.stderr.strip()[:400]}")
     return json.loads(proc.stdout)
+
+
+SAR_NEUTRAL = {"0:1", "1:1", "N/A", "none", ""}
+
+
+def normalise_sar(value: str | None) -> str:
+    """Treat absent and square-pixel SAR as the same thing."""
+    if value is None:
+        return "1:1"
+    text = str(value).strip()
+    return "1:1" if text in SAR_NEUTRAL else text
 
 
 def parse_rate(value: str | None) -> float | None:
@@ -202,6 +214,7 @@ def profile(path: str) -> dict:
         "container": fmt.get("format_name"),
         "bit_rate": int(fmt["bit_rate"]) if fmt.get("bit_rate") else None,
         "video": {
+            "index": video.get("index"),
             "codec": video.get("codec_name"),
             "width": video.get("width"),
             "height": video.get("height"),
@@ -262,7 +275,7 @@ def idet_window(path: str, offset: float, seconds: float, threads: int = 4) -> d
     return acc
 
 
-def analyse_counters(counters: dict, fps: float | None) -> dict:
+def analyse_counters(counters: dict, fps: float | None, *, classifying: bool = True) -> dict:
     """Turn raw idet counters into ratios and a verdict.
 
     Calibrated against real behaviour rather than the ideal: idet reports
@@ -283,9 +296,12 @@ def analyse_counters(counters: dict, fps: float | None) -> dict:
     if ratios["repeated_field_ratio"] >= 0.15:
         verdict, action = "telecined", "ivtc"
         confidence = "high" if ratios["repeated_field_ratio"] >= 0.30 else "medium"
-    elif ratios["interlace_ratio"] >= 0.85:
+    elif ratios["interlace_ratio"] >= 0.90:
+        # Only near-total TFF/BFF is called interlaced. Deinterlacing a
+        # progressive source is irreversible damage (it halves temporal
+        # resolution), so anything short of certain goes to a human instead.
         verdict, action = "interlaced-video", "deinterlace"
-        confidence = "high" if ratios["interlace_ratio"] >= 0.95 else "medium"
+        confidence = "high" if ratios["interlace_ratio"] >= 0.97 else "medium"
     elif ratios["repeated_field_ratio"] >= 0.05 or ratios["interlace_ratio"] >= 0.60:
         verdict, action, confidence = "mixed", "inspect", "low"
     else:
@@ -294,11 +310,26 @@ def analyse_counters(counters: dict, fps: float | None) -> dict:
             confidence = "high"
 
     # 23.976/24p is not a broadcast interlaced format; with no repeated fields,
-    # that is combing on sharp graphics, not interlacing.
-    if verdict != "telecined" and fps and 0 < fps < 24.5 and ratios["repeated_field_ratio"] < 0.05:
+    # that is combing on sharp graphics, not interlacing. This exemption is for
+    # SOURCE classification only - applying it when auditing an output would
+    # wave through exactly the artifacts the audit exists to catch.
+    if (classifying and verdict != "telecined" and fps and 0 < fps < 24.5
+            and ratios["repeated_field_ratio"] < 0.05):
         verdict, action, confidence = "progressive", "none", "medium"
 
     return {**ratios, "verdict": verdict, "action": action, "confidence": confidence}
+
+
+def idet_windows(path: str, duration: float, samples: int = 3,
+                 seconds: float = 60.0) -> list[dict]:
+    """idet over several windows spread across the body of a file."""
+    win = min(seconds, max(5.0, (duration or 0) / (samples + 2)))
+    windows = []
+    for i in range(samples):
+        frac = 0.15 + (0.70 * i / max(1, samples - 1)) if samples > 1 else 0.5
+        offset = max(0.0, min((duration or 0) - win, (duration or 0) * frac))
+        windows.append(idet_window(path, offset, win))
+    return windows
 
 
 def classify(path: str, samples: int = 3, seconds: float = 60.0) -> dict:
@@ -345,6 +376,13 @@ FILTER_CHAINS = {
     "none": [],
     "ivtc": ["fieldmatch=order=auto:combmatch=full:combpel=80", "decimate"],
     "deinterlace": ["bwdif=mode=send_frame:parity=auto:deint=interlaced"],
+    # Hybrid film/video titles: match fields first, then deinterlace only the
+    # frames that are still combed, then drop duplicates.
+    "ivtc_hybrid": [
+        "fieldmatch=order=auto:combmatch=full:combpel=80",
+        "yadif=mode=send_frame:parity=auto:deint=interlaced",
+        "decimate",
+    ],
 }
 
 DENOISE = {
@@ -455,13 +493,21 @@ def cmd_encode(args: argparse.Namespace) -> int:
         if action == "inspect":
             die("classification is ambiguous; rerun with --action none|ivtc|deinterlace")
 
+    metadata: dict[str, str] = {}
+    for item in args.meta or []:
+        if "=" not in item:
+            die(f"--meta expects key=value, got {item!r}")
+        key, value = item.split("=", 1)
+        metadata[key.strip()] = value
+    if not metadata:
+        metadata = {}
+
     cmd = build_encode_command(
         args.src, args.dst,
         action="none" if args.remux else action,
         encoder=args.encoder, quality=args.quality, preset=args.preset,
         denoise=args.denoise, audio=args.audio, vaapi_device=args.vaapi_device,
-        threads=args.threads, extra_vf=args.vf, metadata=dict(
-            m.split("=", 1) for m in (args.meta or [])),
+        threads=args.threads, extra_vf=args.vf, metadata=metadata,
         remux=args.remux,
     )
 
@@ -510,9 +556,10 @@ def vmaf_binary() -> str | None:
     return None
 
 
-def count_frames(path: str) -> int:
+def count_frames(path: str, stream_index: int | None = None) -> int:
+    selector = str(stream_index) if stream_index is not None else "v:0"
     proc = run([
-        which("ffprobe"), "-v", "error", "-select_streams", "v:0",
+        which("ffprobe"), "-v", "error", "-select_streams", selector,
         "-count_frames", "-show_entries", "stream=nb_read_frames",
         "-of", "default=nokey=1:noprint_wrappers=1", path,
     ])
@@ -533,18 +580,25 @@ def percentile(values: list[float], pct: float) -> float:
     return ordered[low] + (ordered[high] - ordered[low]) * (pos - low)
 
 
-def vmaf_model_arg() -> str:
-    """Explicit model file when present: reproducible, and libvmaf 3.x does not
-    reliably expose the built-in model to the ffmpeg filter."""
+def vmaf_model_path() -> str | None:
     explicit = os.environ.get("DISCFORGE_VMAF_MODEL")
     if explicit:
-        return f"model=path={explicit}"
+        return explicit
     for candidate in (
         "/usr/local/share/vmaf/vmaf_v0.6.1.json",
         "/opt/vmaf/share/vmaf/vmaf_v0.6.1.json",
     ):
         if os.path.isfile(candidate):
-            return f"model=path={candidate}"
+            return candidate
+    return None
+
+
+def vmaf_model_arg() -> str:
+    """Explicit model file when present: reproducible, and libvmaf 3.x does not
+    reliably expose the built-in model to the ffmpeg filter."""
+    path = vmaf_model_path()
+    if path:
+        return f"model=path={path}"
     return "model=version=vmaf_v0.6.1"
 
 
@@ -589,7 +643,7 @@ def run_vmaf(ref_filters: str, out_path: str, src_path: str, subsample: int) -> 
         "p1": percentile(frames, 1),
         "p5": percentile(frames, 5),
         "frames": len(frames),
-        "model": "vmaf_v0.6.1",
+        "model": os.path.basename(vmaf_model_path() or "vmaf_v0.6.1"),
     }
 
 
@@ -610,7 +664,7 @@ def run_xpsnr(out_path: str, src_path: str, ref_filters: str) -> dict | None:
     return {"y": float(m.group(1)), "u": float(m.group(2)), "v": float(m.group(3))}
 
 
-def detect_freezes(path: str, min_seconds: float) -> list[dict]:
+def detect_freezes(path: str, min_seconds: float, duration: float) -> list[dict]:
     proc = run([
         which("ffmpeg"), "-hide_banner", "-nostdin", "-v", "info",
         "-i", path, "-an", "-vf", f"freezedetect=n=-60dB:d={min_seconds}",
@@ -624,6 +678,13 @@ def detect_freezes(path: str, min_seconds: float) -> list[dict]:
         m = re.search(r"freeze_duration:\s*([0-9.]+)", line)
         if m and start is not None:
             freezes.append({"start": start, "duration": float(m.group(1))})
+            start = None
+    # A freeze still running when the file ends emits freeze_start and no
+    # duration at all. That is the signature of a stalled encoder tail, and
+    # treating it as "no freezes" would be a wrong PASS.
+    if start is not None and duration:
+        freezes.append({"start": start, "duration": round(duration - start, 3),
+                        "to_eof": True})
     return freezes
 
 
@@ -632,7 +693,7 @@ def cmd_audit(args: argparse.Namespace) -> int:
         die(f"no such output: {args.out}")
 
     sidecar = {}
-    job_path = Path(f"{args.out}.job.json")
+    job_path = Path(args.job) if args.job else Path(f"{args.out}.job.json")
     if job_path.is_file():
         try:
             sidecar = json.loads(job_path.read_text())
@@ -642,15 +703,20 @@ def cmd_audit(args: argparse.Namespace) -> int:
     src_profile = profile(args.src)
     out_profile = profile(args.out)
 
-    src_frames = count_frames(args.src)
-    out_frames = count_frames(args.out)
+    src_frames = count_frames(args.src, src_profile["video"].get("index"))
+    out_frames = count_frames(args.out, out_profile["video"].get("index"))
     out_fps = out_profile["video"]["fps"] or 0
     src_fps = src_profile["video"]["fps"] or 0
 
     action = args.action or sidecar.get("action") or "none"
+    # The reference must pass through the SAME chain the encode used, denoise
+    # included. Scoring a denoised encode against an un-denoised reference
+    # guarantees a low VMAF and would quarantine perfectly good files.
     ref_filters = args.ref_filters or ""
     if not ref_filters and action in FILTER_CHAINS:
-        ref_filters = ",".join(FILTER_CHAINS[action])
+        chain = list(FILTER_CHAINS[action])
+        chain += list(DENOISE.get(sidecar.get("denoise") or "none", []))
+        ref_filters = ",".join(chain)
 
     reasons: list[str] = []
     metrics: dict = {
@@ -666,7 +732,12 @@ def cmd_audit(args: argparse.Namespace) -> int:
     }
 
     # --- expected frame count ------------------------------------------------
-    if action == "ivtc":
+    # Derive from the fps ratio rather than assuming 3:2. 29.97->23.976 is 0.8x,
+    # but PAL euro-pulldown is 25->25 (1.0x) and a hardcoded 0.8 would fail
+    # every PAL title.
+    if action in ("ivtc", "ivtc_hybrid") and src_fps:
+        expected = round(src_frames * (out_fps / src_fps))
+    elif action in ("ivtc", "ivtc_hybrid"):
         expected = round(src_frames * 0.8)
     else:
         expected = src_frames
@@ -679,34 +750,68 @@ def cmd_audit(args: argparse.Namespace) -> int:
             f"(tolerance {tolerance})")
 
     # --- fps ----------------------------------------------------------------
-    if abs(out_fps - src_fps) > 0.02 and action != "ivtc":
+    if not src_fps or not out_fps:
+        metrics["fps_check"] = "skipped (source or output reports no frame rate)"
+    elif action in ("ivtc", "ivtc_hybrid"):
+        # Either the pulldown was removed (0.8x) or it was a PAL/euro case
+        # where the rate is unchanged. Anything else is a real failure.
+        ok = any(abs(out_fps - src_fps * factor) <= 0.05 for factor in (1.0, 0.8))
+        if not ok:
+            reasons.append(
+                f"IVTC output fps {out_fps:.3f} is neither {src_fps:.3f} "
+                f"nor {src_fps * 0.8:.3f}")
+    elif abs(out_fps - src_fps) > 0.02:
         reasons.append(f"fps {out_fps:.3f} != source {src_fps:.3f}")
-    if action == "ivtc" and abs(out_fps - 24000 / 1001) > 0.02 and abs(out_fps - 25.0) > 0.02:
-        reasons.append(f"IVTC output fps {out_fps:.3f} is neither 23.976 nor 25")
 
     # --- geometry -----------------------------------------------------------
     if (out_profile["video"]["width"], out_profile["video"]["height"]) != (
             src_profile["video"]["width"], src_profile["video"]["height"]):
         reasons.append("resolution changed")
-    metrics["sar"] = {"in": src_profile["video"]["sar"], "out": out_profile["video"]["sar"]}
+    src_sar = normalise_sar(src_profile["video"]["sar"])
+    out_sar = normalise_sar(out_profile["video"]["sar"])
+    metrics["sar"] = {"in": src_sar, "out": out_sar}
+    if src_sar != out_sar:
+        # Anamorphic DVD dropping its SAR ships visibly stretched in Jellyfin,
+        # and nothing else in the audit would notice.
+        reasons.append(f"sample aspect ratio changed: {src_sar} -> {out_sar}")
 
     # --- residual interlacing ----------------------------------------------
-    idet = idet_window(args.out, 0, min(120.0, out_profile["duration"] or 120.0))
-    interlace = analyse_counters(idet, out_fps)
-    metrics["output_interlace"] = {
-        "progressive_ratio": round(interlace["progressive_ratio"], 4),
-        "repeated_field_ratio": round(interlace["repeated_field_ratio"], 4),
-        "interlace_ratio": round(interlace["interlace_ratio"], 4),
-        "verdict": interlace["verdict"],
-    }
-    if interlace["verdict"] in ("telecined", "interlaced-video"):
+    # Sample the whole file, not the first two minutes: chain failures and
+    # hybrid sections live past the opening credits.
+    out_duration = out_profile["duration"] or 0.0
+    windows = idet_windows(args.out, out_duration, samples=args.interlace_samples)
+    per_window = []
+    for index, counters in enumerate(windows):
+        analysed = analyse_counters(counters, out_fps, classifying=False)
+        per_window.append({
+            "window": index,
+            "progressive_ratio": round(analysed["progressive_ratio"], 4),
+            "repeated_field_ratio": round(analysed["repeated_field_ratio"], 4),
+            "interlace_ratio": round(analysed["interlace_ratio"], 4),
+            "verdict": analysed["verdict"],
+        })
+    metrics["output_interlace"] = per_window
+
+    # Two numeric signals, no verdict shortcuts: repeated fields means pulldown
+    # survived, a very high combing ratio means real interlacing survived.
+    # Between those and clean output sits idet's noise floor on detailed
+    # content (~0.5 on a clean encode), so the combing bar is 0.75 and the
+    # ambiguous middle is reported rather than passed silently.
+    survivors = [w for w in per_window if w["repeated_field_ratio"] >= 0.15]
+    combed = [w for w in per_window if w["interlace_ratio"] >= args.max_interlace]
+    if survivors:
+        worst = max(survivors, key=lambda w: w["repeated_field_ratio"])
         reasons.append(
-            f"output still reads {interlace['verdict']} "
-            f"(interlace {interlace['interlace_ratio']:.2f}, "
-            f"repeated fields {interlace['repeated_field_ratio']:.2f})")
-    elif interlace["verdict"] == "mixed":
+            f"output still carries repeated fields (telecine left): window "
+            f"{worst['window']} reads {worst['repeated_field_ratio']:.2f}")
+    elif combed:
+        worst = max(combed, key=lambda w: w["interlace_ratio"])
+        reasons.append(
+            f"output still reads interlaced: window {worst['window']} has "
+            f"combing {worst['interlace_ratio']:.2f}")
+    elif any(w["interlace_ratio"] >= 0.40 for w in per_window):
         metrics["output_interlace_warning"] = (
-            "ambiguous interlace statistics; verify by eye before deleting the source")
+            "borderline combing statistics; verify by eye before deleting the source")
 
     # --- duration -----------------------------------------------------------
     dur_delta = abs(out_profile["duration"] - src_profile["duration"])
@@ -723,7 +828,7 @@ def cmd_audit(args: argparse.Namespace) -> int:
             reasons.append(f"{kind} tracks dropped: {n_in} -> {n_out}")
 
     # --- freezes ------------------------------------------------------------
-    freezes = detect_freezes(args.out, args.freeze_seconds)
+    freezes = detect_freezes(args.out, args.freeze_seconds, out_duration)
     metrics["freezes"] = freezes
     if freezes:
         reasons.append(f"{len(freezes)} freeze(s) >= {args.freeze_seconds}s in output")
@@ -894,7 +999,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("src")
     p.add_argument("dst")
     p.add_argument("--action", default="auto",
-                   choices=["auto", "none", "ivtc", "deinterlace"])
+                   choices=["auto", "none", "ivtc", "ivtc_hybrid", "deinterlace"])
     p.add_argument("--encoder", default="av1_vaapi",
                    choices=["av1_vaapi", "svtav1", "x265", "x264"])
     p.add_argument("--quality", type=int, default=24,
@@ -921,12 +1026,21 @@ def main(argv: list[str] | None = None) -> int:
                    help="filter chain used for encoding (default: from sidecar)")
     p.add_argument("--ref-filters", default=None,
                    help="filters to apply to the reference before comparison")
-    p.add_argument("--vmaf-min", type=float, default=None)
-    p.add_argument("--vmaf-p1-min", type=float, default=None)
-    p.add_argument("--xpsnr-min", type=float, default=None)
+    p.add_argument("--vmaf-min", type=float, default=95.0,
+                   help="mean VMAF floor (default 95; pass 0 to disable)")
+    p.add_argument("--vmaf-p1-min", type=float, default=90.0,
+                   help="1st-percentile VMAF floor (default 90; 0 disables)")
+    p.add_argument("--xpsnr-min", type=float, default=36.0,
+                   help="XPSNR y floor when VMAF is unavailable (default 36)")
     p.add_argument("--subsample", type=int, default=4)
     p.add_argument("--no-vmaf", action="store_true")
     p.add_argument("--freeze-seconds", type=float, default=2.0)
+    p.add_argument("--interlace-samples", type=int, default=3,
+                   help="how many windows to idet across the output (default 3)")
+    p.add_argument("--max-interlace", type=float, default=0.75,
+                   help="fail if any sampled window reads this combed (default 0.75)")
+    p.add_argument("--job", default=None,
+                   help="job sidecar written by encode (default <out>.job.json)")
     p.add_argument("--json", default=None)
     p.set_defaults(func=cmd_audit)
 

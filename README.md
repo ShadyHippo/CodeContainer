@@ -278,7 +278,7 @@ is retried, then quarantined; it never lands in the library silently. The
 output is mounted read-only as the input directory.
 
 The image includes `ffmpeg` (distro build: VAAPI, x265, SVT-AV1, AV1) and
-`ffmpeg-vmaf` (a separate decode-only build with libvmaf, because the distro
+`ffmpeg-vmaf` (a separate score-only build with libvmaf, because the distro
 package ships without it). Encoding uses the former; VMAF scoring uses the
 latter. No HandBrake: it hides the filter chain, and the audit needs to know
 exactly what was applied.

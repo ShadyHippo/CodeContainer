@@ -36,12 +36,18 @@ writing into an unexpected place:
 
 ```bash
 echo "${RIPS_IN:?set RIPS_IN}" "${LIB_TV:?set LIB_TV}" "${LIB_MOVIES:?set LIB_MOVIES}"
-mount | grep -E "$RIPS_IN|$LIB_TV|$LIB_MOVIES"
+mount | grep -F -e "$RIPS_IN" -e "$LIB_TV" -e "$LIB_MOVIES"
 ```
 
 Reports, audit JSON and quarantine live in `${DISCFORGE_WORK:-$HOME/Projects/discforge-work}`,
 never in the library. That directory is durable, Jellyfin cannot see it, and it
-survives a container rebuild. Create it if it is missing.
+survives a container rebuild. Create it if it is missing, and use it for the
+whole batch:
+
+```bash
+WORK="${DISCFORGE_WORK:-$HOME/Projects/discforge-work}"
+mkdir -p "$WORK/build" "$WORK/reports" "$WORK/quarantine"
+```
 
 ## 1. Survey before touching anything
 
@@ -87,7 +93,8 @@ MakeMKV names are meaningless (`title_t03.mkv`), so do not read meaning into the
 When a title is genuinely ambiguous, look at it instead of guessing:
 
 ```bash
-ffmpeg -v error -ss 300 -i "$f" -frames:v 12 -vf "scale=320:-2,tile=4x3" -f image2 /tmp/sheet-%02d.png
+mid=$(ffprobe -v error -show_entries format=duration -of default=nk=1:nw=1 "$f" | awk '{printf "%d", $1/3}')
+ffmpeg -v error -ss "$mid" -i "$f" -frames:v 12 -vf "scale=320:-2,tile=4x3" -f image2 /tmp/sheet-%02d.png
 magick montage /tmp/sheet-*.png -tile 4x3 -geometry +2+2 /tmp/contact.png
 ```
 
@@ -106,11 +113,17 @@ discforge classify "$f"        # samples 3 windows, runs idet
 | `interlaced-video` | `deinterlace` | true interlaced video (sport, news, some extras) |
 | `mixed` | inspect | hybrid or badly flagged; look at frames |
 
+For a title that is mostly film but has genuinely interlaced sections, use
+`--action ivtc_hybrid`: field match, deinterlace only the frames that are still
+combed, then decimate. Do not stack `ivtc` and `deinterlace` by hand.
+
 Rules that matter more than the verdict:
 
-- **Never IVTC 25 fps content.** PAL film in an interlaced container is usually
-  25p split across fields. IVTC there drops a fifth of the frames. Use
-  `deinterlace` (or `none` if it weaves cleanly).
+- **Never IVTC 25 fps content.** PAL film in an interlaced container is 25p
+  split across fields, not 3:2 pulldown. IVTC has nothing to remove there and
+  will throw away real frames. Use `deinterlace`, or `none` if it weaves
+  cleanly. (The audit derives its expected frame count from the fps ratio for
+  exactly this reason: 29.97→23.976 is 0.8×, PAL is 1.0×.)
 - **Do not deinterlace 29.97 telecined film.** It keeps the duplicate frames as
   smeared pairs.
 - **Do not trust `field_order` metadata** — DVD flags lie. The `idet` numbers
@@ -128,7 +141,7 @@ There is no global profile. Choose per title and record why in the sidecar.
 | situation | encoder | notes |
 |---|---|---|
 | GPU healthy | `av1_vaapi` | `vainfo --device /dev/dri/renderD128` must list AV1 encode. Fast; ICQ rate control |
-| GPU absent/wedged | `svtav1` | `preset 6` for 480p, `4–6` for 1080p. Slower but better per bit at 480p |
+| GPU absent/wedged | `svtav1` | `preset 4` for 480p (quality first), `4–6` for 1080p. Slower but better per bit at 480p |
 | Must match an existing library | `x265` | only when compatibility beats efficiency |
 
 Check the GPU once per batch, and never retry it in a loop:
@@ -171,12 +184,18 @@ lower it mid-batch to save time.
 
 ## 5. Encode
 
+Encode into `$DISCFORGE_WORK/build/`, audit there, and only then move the file
+into the library. That keeps `.job.json` and audit JSON out of Jellyfin's view,
+and it means a failed encode never has to be cleaned up from a media folder.
 Always dry-run first and read the command — that is the whole point of picking
 settings per title:
 
 ```bash
-discforge encode "$f" "$out.part.mkv" --action ivtc --encoder svtav1 --quality 26 --dry-run
-discforge encode "$f" "$out.part.mkv" --action ivtc --encoder svtav1 --quality 26
+discforge encode "$f" "$WORK/build/$name.mkv" --action ivtc \
+  --encoder svtav1 --preset 4 --quality 23 --dry-run
+discforge encode "$f" "$WORK/build/$name.mkv" --action ivtc \
+  --encoder svtav1 --preset 4 --quality 23 \
+  --sidecar "$WORK/reports/$name.job.json"
 ```
 
 `--action auto` runs `classify` itself and refuses on `mixed`, which is the right
@@ -189,9 +208,10 @@ Nothing enters the library unaudited. The audit compares against the source
 reference rather than against interlaced frames.
 
 ```bash
-discforge audit "$src" "$out.part.mkv" \
-  --vmaf-min 93 --vmaf-p1-min 88 \
-  --json "$out.part.audit.json"
+discforge audit "$src" "$WORK/build/$name.mkv" \
+  --job "$WORK/reports/$name.job.json" \
+  --vmaf-min 95 --vmaf-p1-min 90 \
+  --json "$WORK/reports/$name.audit.json"
 ```
 
 Suggested thresholds — these are starting points, calibrate on the first disc of
@@ -206,16 +226,24 @@ a batch and then keep them:
 If a title cannot clear these at a sane bitrate, that is a signal to remux it
 or to leave it alone rather than to accept a worse encode.
 
-The audit also asserts frame count (±0.2%, 0.8× for IVTC), fps, resolution, SAR,
-audio/subtitle track counts, duration (±0.75 s), residual interlacing (must read
-≥ 99.9% progressive), and no freeze ≥ 2 s.
+The audit also asserts frame count (±0.2%, expected from the fps ratio for
+IVTC), fps, resolution, sample aspect ratio, audio/subtitle track counts,
+duration (±0.75 s), residual interlacing (sampled across three windows: repeated
+fields fail at ≥ 0.15, combing fails at ≥ 0.75, and 0.40–0.75 is reported as a
+warning to eyeball), and no freeze ≥ 2 s
+— including a freeze that runs to the end of the file, which is the classic
+signature of a stalled encode.
+
+Thresholds have defaults (VMAF 95 / p1 90, XPSNR 36); passing `0` disables a
+check. Do not lower them to make a title pass.
 
 **Failure handling:**
 
 | reason | first response |
 |---|---|
 | VMAF/XPSNR low | re-encode at quality−4 (lower number = better), max 2 attempts |
-| still interlaced after filtering | wrong action — re-classify longer, try the other chain |
+| still interlaced after filtering | wrong action — re-classify longer, try the other chain, or `ivtc_hybrid` |
+| freeze at the end of the file | encoder stalled; re-encode, and check free space |
 | frame count short/long | encoder dropped or duplicated frames; re-run; check `decimate` |
 | fps wrong | IVTC applied to 25 fps, or missing on telecined 29.97 |
 | duration short | truncated file; re-encode, check free space |
@@ -249,9 +277,15 @@ Film (Year)/Extras/Featurette Name.mkv
 - Leave a **generic clean name** when TMDB has no episode title: still
   `S01E03`, never `title_t03`.
 - Multi-episode files: `S01E01-E02`.
-- Fix container metadata so the library is tidy without re-muxing:
-  `mkvpropedit "$f" --edit track:v1 --set name="Video" ...` and set the default
-  audio/subtitle flags deliberately.
+- Fix container metadata so the library is tidy without re-muxing: set the
+  language on every track the ripper left as `und`, and pick the default audio /
+  subtitle stream deliberately:
+  ```bash
+  mkvpropedit "$f" \
+    --edit track:a1 --set language=eng --set flag-default=1 \
+    --edit track:a2 --set language=eng --set flag-default=0 \
+    --edit track:s1 --set language=eng --set flag-default=1
+  ```
 
 **Sidecars stay out of the library.** Reports and audit JSON go to
 a sibling path outside the library — `$LIB_TV/../_discforge-reports/<Show>/<file>.json`

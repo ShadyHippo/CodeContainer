@@ -40,14 +40,15 @@ RUN set -eux; \
     ls -l /out
 
 ###############################################################################
-# Build stage: libvmaf + a decode-only ffmpeg for audit metrics.
+# Build stage: libvmaf + a score-only ffmpeg for audit metrics.
 #
 # The distro ffmpeg is built without --enable-libvmaf, so it cannot score VMAF
 # at all - which leaves "is the transcode still as good as the source?" answered
 # by weaker proxies. Rebuilding the whole encoder stack to add one filter is slow
-# and fragile; instead this builds a small ffmpeg that only decodes and scores,
-# installed as /usr/local/bin/ffmpeg-vmaf. Encoding still uses the distro ffmpeg,
-# which keeps VAAPI, x265, SVT-AV1 and the rest exactly as packaged.
+# and fragile; instead this builds a second ffmpeg with no network protocols,
+# no docs and no hardware paths, used only to decode, score and report,
+# installed as /usr/local/bin/ffmpeg-vmaf. Encoding still uses the distro
+# ffmpeg, which keeps VAAPI, x265, SVT-AV1 and the rest exactly as packaged.
 #
 # Cost: a few minutes of build time and ~30MB in the final image.
 # The smoke test at the end fails the build if VMAF stops working, so an audit
@@ -250,7 +251,7 @@ RUN set -eux; \
 # =============================================================================
 COPY --from=gotools /out/gopls /out/goimports /out/dlv /usr/local/bin/
 COPY --from=vmaf /out/bin/ffmpeg-vmaf /usr/local/bin/ffmpeg-vmaf
-COPY --from=vmaf /out/lib/libvmaf.so.3 /out/lib/libvmaf.so.3.0.0 /usr/local/lib/
+COPY --from=vmaf /out/lib/ /usr/local/lib/
 COPY --from=vmaf /out/share/vmaf_v0.6.1.json /usr/local/share/vmaf/vmaf_v0.6.1.json
 
 # =============================================================================
@@ -366,6 +367,15 @@ RUN set -eux; \
     chmod 0755 /usr/local/bin/preview /usr/local/bin/agent-notes /usr/local/bin/tooling /usr/local/bin/pair /usr/local/bin/chromium /usr/local/bin/ship /usr/local/bin/council /usr/local/bin/discforge /usr/local/bin/ffmpeg-vmaf; \
     ldconfig; \
     ffmpeg-vmaf -hide_banner -filters | grep -q libvmaf; \
+    echo '--- final layout: rpath, soname and model path as discforge probes them ---'; \
+    ffmpeg-vmaf -v error -f lavfi -i "testsrc2=size=160x120:rate=5:duration=1" \
+      -c:v mpeg4 -q:v 2 /tmp/fv-ref.mkv; \
+    ffmpeg-vmaf -v error -i /tmp/fv-ref.mkv -c:v mpeg4 -q:v 22 /tmp/fv-dist.mkv; \
+    ffmpeg-vmaf -v error -i /tmp/fv-dist.mkv -i /tmp/fv-ref.mkv \
+      -lavfi "[0:v][1:v]libvmaf=model=path=/usr/local/share/vmaf/vmaf_v0.6.1.json:log_fmt=json:log_path=/tmp/fv.json" \
+      -f null -; \
+    grep -q pooled_metrics /tmp/fv.json; \
+    rm -f /tmp/fv-ref.mkv /tmp/fv-dist.mkv /tmp/fv.json; \
     printf '\n[ -f /etc/bash.bashrc.d-codecontainer ] && . /etc/bash.bashrc.d-codecontainer\n' >> /etc/bash.bashrc; \
     printf '\n[ -f /etc/zsh/zshrc.d-codecontainer ] && . /etc/zsh/zshrc.d-codecontainer\n' >> /etc/zsh/zshrc; \
     mkdir -p /root/Projects; \
