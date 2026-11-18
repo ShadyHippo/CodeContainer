@@ -897,8 +897,9 @@ def main(argv: list[str] | None = None) -> int:
                    choices=["auto", "none", "ivtc", "deinterlace"])
     p.add_argument("--encoder", default="av1_vaapi",
                    choices=["av1_vaapi", "svtav1", "x265", "x264"])
-    p.add_argument("--quality", type=int, default=26,
-                   help="ICQ for av1_vaapi, CRF for software encoders")
+    p.add_argument("--quality", type=int, default=24,
+                   help="ICQ for av1_vaapi, CRF for software encoders "
+                        "(lower is better; 22-24 is the quality-first default)")
     p.add_argument("--preset", default=None)
     p.add_argument("--denoise", default="none", choices=list(DENOISE))
     p.add_argument("--audio", default="copy",

@@ -140,21 +140,29 @@ LIBVA_DRIVER_NAME=iHD vainfo --device /dev/dri/renderD128 2>&1 | grep -i 'AV1Pro
 If it fails, note it in the report, use `svtav1`, and move on. A wedged card is
 the host's problem, not something to debug mid-batch.
 
-**Quality starting points** (then let the audit decide)
+**Quality starting points.** The user's standing rule is *quality over size*:
+they do not care how long an encode takes, only that the library is AV1, looks
+as good as the disc, and carries no interlace, blocking or smeared grain. When
+in doubt, spend the bits and take the slower preset.
 
 | source | encoder | quality | why |
 |---|---|---|---|
-| DVD 480p | `svtav1` | CRF 26 | hardware AV1 at 480p is outside its design point; check both if time allows |
-| DVD 480p | `av1_vaapi` | ICQ 28 | faster; verify with VMAF before accepting |
-| Blu-ray 1080p | `av1_vaapi` | ICQ 24 | hardware sweet spot |
-| Blu-ray 1080p | `svtav1` | CRF 26 | when the GPU is down |
-| Anything already efficient | `--remux` | — | no re-encode at all |
+| DVD 480p | `svtav1` preset 4 | CRF 22-24 | software wins per bit at 480p; hardware AV1 is tuned for 1080p |
+| DVD 480p | `av1_vaapi` | ICQ 24 | only if it clears the gate; verify with VMAF, do not assume |
+| Blu-ray 1080p | `svtav1` preset 4-6 | CRF 22-24 | best quality per bit when time is free |
+| Blu-ray 1080p | `av1_vaapi` | ICQ 22 | hardware sweet spot, much faster |
+| Anything already efficient | `--remux` | — | no re-encode at all; a lossless copy beats a re-encode |
+
+A failed gate is cheaper than a bad library entry: re-encode lower before
+accepting a marginal score, and only ever *raise* the quality target, never
+lower it mid-batch to save time.
 
 **Other choices**
 
 - **Denoise**: `light` only for visibly noisy DVD; never on Blu-ray. Denoising
   raises the metrics and lowers the bitrate while removing real detail — when
-  in doubt, leave it off.
+  in doubt, leave it off. Grain is part of the film; the user asked for no
+  *artifacts*, not for a grain-free picture.
 - **Audio**: `--audio copy` unless the user named a client problem. Copying DTS-HD
   and TrueHD is correct; transcoding them silently is not.
 - **Subtitles**: `copy`. DVD VobSub and PGS survive into MKV. Do not OCR unless
@@ -191,9 +199,12 @@ a batch and then keep them:
 
 | check | DVD 480p | Blu-ray 1080p |
 |---|---|---|
-| VMAF mean | ≥ 93 | ≥ 95 |
-| VMAF p1 | ≥ 88 | ≥ 91 |
-| XPSNR y (no VMAF build) | ≥ 32 | ≥ 34 |
+| VMAF mean | ≥ 95 | ≥ 96 |
+| VMAF p1 | ≥ 90 | ≥ 92 |
+| XPSNR y (no VMAF build) | ≥ 36 | ≥ 38 |
+
+If a title cannot clear these at a sane bitrate, that is a signal to remux it
+or to leave it alone rather than to accept a worse encode.
 
 The audit also asserts frame count (±0.2%, 0.8× for IVTC), fps, resolution, SAR,
 audio/subtitle track counts, duration (±0.75 s), residual interlacing (must read
