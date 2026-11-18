@@ -335,18 +335,12 @@ def idet_windows(path: str, duration: float, samples: int = 3,
 def classify(path: str, samples: int = 3, seconds: float = 60.0) -> dict:
     prof = profile(path)
     duration = prof["duration"] or 0.0
-    win = min(seconds, max(10.0, duration / (samples + 2)))
-    offsets = []
-    for i in range(samples):
-        # spread across the body, avoiding the first and last 10%
-        frac = 0.15 + (0.70 * i / max(1, samples - 1)) if samples > 1 else 0.5
-        offsets.append(max(0.0, min(duration - win, duration * frac)))
+    windows = idet_windows(path, duration, samples=samples, seconds=seconds)
 
     totals = {"neither": 0, "top": 0, "bottom": 0, "tff": 0, "bff": 0,
               "progressive": 0, "undetermined": 0, "m_tff": 0, "m_bff": 0,
               "m_progressive": 0, "m_undetermined": 0}
-    for off in offsets:
-        acc = idet_window(path, off, win)
+    for acc in windows:
         for key in totals:
             totals[key] += acc[key]
 
@@ -356,7 +350,7 @@ def classify(path: str, samples: int = 3, seconds: float = 60.0) -> dict:
         "duration": duration,
         "fps": prof["video"]["fps"],
         "field_order": prof["video"]["field_order"],
-        "windows": len(offsets),
+        "windows": len(windows),
         "frames_sampled": sum(totals[k] for k in ("progressive", "tff", "bff", "undetermined")),
         "progressive_ratio": round(analysed["progressive_ratio"], 4),
         "repeated_field_ratio": round(analysed["repeated_field_ratio"], 4),
@@ -499,8 +493,6 @@ def cmd_encode(args: argparse.Namespace) -> int:
             die(f"--meta expects key=value, got {item!r}")
         key, value = item.split("=", 1)
         metadata[key.strip()] = value
-    if not metadata:
-        metadata = {}
 
     cmd = build_encode_command(
         args.src, args.dst,
@@ -682,9 +674,9 @@ def detect_freezes(path: str, min_seconds: float, duration: float) -> list[dict]
     # A freeze still running when the file ends emits freeze_start and no
     # duration at all. That is the signature of a stalled encoder tail, and
     # treating it as "no freezes" would be a wrong PASS.
-    if start is not None and duration:
-        freezes.append({"start": start, "duration": round(duration - start, 3),
-                        "to_eof": True})
+    if start is not None:
+        to_eof = round(duration - start, 3) if duration else None
+        freezes.append({"start": start, "duration": to_eof, "to_eof": True})
     return freezes
 
 
@@ -699,6 +691,11 @@ def cmd_audit(args: argparse.Namespace) -> int:
             sidecar = json.loads(job_path.read_text())
         except json.JSONDecodeError:
             sidecar = {}
+
+    if sidecar.get("fingerprint"):
+        if quick_fingerprint(args.src) != sidecar["fingerprint"]:
+            die(f"{job_path} belongs to a different source "
+                f"(fingerprint mismatch); refusing to audit against the wrong chain")
 
     src_profile = profile(args.src)
     out_profile = profile(args.out)
@@ -779,7 +776,12 @@ def cmd_audit(args: argparse.Namespace) -> int:
     # Sample the whole file, not the first two minutes: chain failures and
     # hybrid sections live past the opening credits.
     out_duration = out_profile["duration"] or 0.0
-    windows = idet_windows(args.out, out_duration, samples=args.interlace_samples)
+    if args.interlace_samples > 0:
+        windows = idet_windows(args.out, out_duration, samples=args.interlace_samples)
+    else:
+        # Whole file. A combed section between sparse samples would otherwise
+        # pass, and the brief is quality over speed.
+        windows = [idet_window(args.out, 0.0, max(1.0, out_duration))]
     per_window = []
     for index, counters in enumerate(windows):
         analysed = analyse_counters(counters, out_fps, classifying=False)
@@ -793,10 +795,10 @@ def cmd_audit(args: argparse.Namespace) -> int:
     metrics["output_interlace"] = per_window
 
     # Two numeric signals, no verdict shortcuts: repeated fields means pulldown
-    # survived, a very high combing ratio means real interlacing survived.
-    # Between those and clean output sits idet's noise floor on detailed
-    # content (~0.5 on a clean encode), so the combing bar is 0.75 and the
-    # ambiguous middle is reported rather than passed silently.
+    # survived, near-total combing means real interlacing survived. The bar is
+    # the same 0.90 the classifier uses because idet's noise floor on detailed
+    # line art measures 0.8+ even for a bit-identical file - a lower bar
+    # quarantines clean encodes and teaches the operator to ignore the gate.
     survivors = [w for w in per_window if w["repeated_field_ratio"] >= 0.15]
     combed = [w for w in per_window if w["interlace_ratio"] >= args.max_interlace]
     if survivors:
@@ -809,7 +811,7 @@ def cmd_audit(args: argparse.Namespace) -> int:
         reasons.append(
             f"output still reads interlaced: window {worst['window']} has "
             f"combing {worst['interlace_ratio']:.2f}")
-    elif any(w["interlace_ratio"] >= 0.40 for w in per_window):
+    elif any(w["interlace_ratio"] >= 0.60 for w in per_window):
         metrics["output_interlace_warning"] = (
             "borderline combing statistics; verify by eye before deleting the source")
 
@@ -1035,10 +1037,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--subsample", type=int, default=4)
     p.add_argument("--no-vmaf", action="store_true")
     p.add_argument("--freeze-seconds", type=float, default=2.0)
-    p.add_argument("--interlace-samples", type=int, default=3,
-                   help="how many windows to idet across the output (default 3)")
-    p.add_argument("--max-interlace", type=float, default=0.75,
-                   help="fail if any sampled window reads this combed (default 0.75)")
+    p.add_argument("--interlace-samples", type=int, default=0,
+                   help="idet windows across the output; 0 (default) scans the "
+                        "whole file, which costs one extra decode pass")
+    p.add_argument("--max-interlace", type=float, default=0.90,
+                   help="fail if any sampled window reads this combed (default 0.90)")
     p.add_argument("--job", default=None,
                    help="job sidecar written by encode (default <out>.job.json)")
     p.add_argument("--json", default=None)

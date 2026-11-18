@@ -228,14 +228,20 @@ or to leave it alone rather than to accept a worse encode.
 
 The audit also asserts frame count (±0.2%, expected from the fps ratio for
 IVTC), fps, resolution, sample aspect ratio, audio/subtitle track counts,
-duration (±0.75 s), residual interlacing (sampled across three windows: repeated
-fields fail at ≥ 0.15, combing fails at ≥ 0.75, and 0.40–0.75 is reported as a
-warning to eyeball), and no freeze ≥ 2 s
+duration (±0.75 s), residual interlacing (whole file by default: repeated fields
+fail at ≥ 0.15, combing fails at ≥ 0.90 — idet's noise floor on detailed line art
+reaches ~0.8 even for a bit-identical file, so a tighter bar quarantines clean
+encodes — and 0.60–0.90 is reported as a warning to eyeball), and no freeze ≥ 2 s
 — including a freeze that runs to the end of the file, which is the classic
 signature of a stalled encode.
 
 Thresholds have defaults (VMAF 95 / p1 90, XPSNR 36); passing `0` disables a
 check. Do not lower them to make a title pass.
+
+The audit decodes the output several times (frame count, freezes, interlace,
+VMAF). At 1080p that is minutes per title; that cost is the point, and
+`--interlace-samples N` only exists for a quick look, never for the final
+decision.
 
 **Failure handling:**
 
