@@ -182,77 +182,34 @@ Rules that outrank the table:
   source creates halos, which are artifacts.
 - Prefer the *simplest* chain that fixes the diagnosis.
 
-## 4. Choose the encoder and the quality point
+## 4. Work out the best settings for *this* disc
 
-The user wants the smallest file that clears the bar. That means *targeting
-quality*, not picking a CRF and hoping.
+There is no recipe to follow. Every disc gets diagnosed (§2), then its settings
+are **derived by measurement**. The tables below are where to start bracketing,
+not answers. You are the expert here: decide, record why, and move on. Do not
+ask the user to choose a CRF.
 
-**Bracket on a sample, then commit.** Take 2–4 minutes from the middle of a
-title, try two or three settings, score each (§6), and pick the smallest that
-clears the bar with margin. Then use that setting for the batch.
+That includes quirks: a series is not uniform. Different seasons, studios,
+masters and even discs in the same box set are authored differently. If a disc
+looks unlike the last one, diagnose it again instead of reusing the setting.
 
-**Always try Intel hardware first.** The user's standing preference is to use
-the Arc GPU: it is ~10× cheaper in energy and 3–5× faster, which matters across
-a library. It is still gated by the quality contract, so let measurements decide
-per title, not habit.
+### 4.1 The procedure, for every title
 
-- **Intel VAAPI AV1** is the working hardware path (`vainfo` must list
-  `AV1Profile0` with `EncSlice`). VAAPI has **no speed/quality preset** — the
-  knobs are `ICQ`, `--blbrc` (~25% smaller at equal quality), `--10bit`
-  (gradients/banding) and, on 4K, tile counts.
-- **Arc B-series prerequisites**, straight from Jellyfin's Intel HWA docs and
-  verified here: Linux kernel **6.12+** (6.18 in use), the **`xe`** driver
-  instead of `i915` (GuC/HuC and low-power encode are automatic on `xe`), and
-  **Resizable BAR, which is mandatory for B-series** — without it the media
-  driver crashes the encoder. Check it by listing the GPU's PCI BARs: the VRAM
-  aperture should be tens of GiB (16 GiB here), not 256 MiB.
-  ```bash
-  for i in 0 1 2 3; do stat -Lc "%n %s" /sys/bus/dri/*/device/resource$i 2>/dev/null; done
-  ```
-  Also confirm the GPU is really doing the work: encode speed (seconds, not
-  minutes) or `intel_gpu_top` showing Video/VideoEnhance busy.
-- **QSV is a dead end on this system, and it is not for want of packages.**
-  Jellyfin's own docs prefer QSV on Linux for performance and tuning, so this
-  was tested properly, twice:
-  - Intel's GPU repo ships `libmfxgen1` 24.2.4 (a 24.04/`i915` build); installed,
-    it fails with `MFX session: -9` on this 26.04/`xe` stack.
-  - Building the current oneVPL GPU runtime (`vpl-gpu-rt` 1.2.17) from source
-    and installing it to `/usr/local` fails identically.
-  QSV and VAAPI drive the *same* media engine, so the only thing missing is
-  QSV's preset names and extbrc. Do not spend a rebuild on it; revisit when
-  Intel ships a `xe`-era runtime. VAAPI is fully supported and is what we use.
-- **SVT-AV1 (software)** is the fallback, and the quality-per-bit leader at low
-  bitrates. Preset 4–6 at 480p, 4 at 1080p and above, 10-bit.
-
-What the evidence says about quality per bit (published comparisons plus
-measurements here):
-
-- Hardware AV1 is competitive at high bitrates and **slips below roughly
-  2 Mbps**; matched-quality comparisons put SVT-AV1 ahead at low rates, with
-  fewer artifacts on hard content.
-- libaom is marginally better than SVT but 3–5× slower; not worth it for a
-  library.
-- At 480p the Arc encoder has a perceptual floor — on grainy DVD it cannot reach
-  transparency at *any* bitrate (butteraugli plateaued ~1.66 while the file grew
-  larger than the source). At 1080p and 4K it is usually excellent.
-
-So: hardware first for every title, fall back to SVT when the hardware cannot
-clear the gate at a sane size, and record which was used and why.
-
-**Starting points for the test matrix** (run these on the sample, then pick):
-
-| source | try, in this order | why |
-|---|---|---|
-| DVD 480p, clean film | VAAPI `--10bit --blbrc` ICQ 22, then 20 | fast; raise quality until it passes |
-| DVD 480p, noisy/soft TV | same + `--denoise light` + `deband`, ICQ 20-22 | noise removal is wanted, banding prevented |
-| DVD 480p where hardware fails the gate | SVT preset 6 CRF 20, then 18 | software wins per bit at low rates |
-| Blu-ray 1080p | VAAPI `--10bit --blbrc` ICQ 22, then SVT preset 4 CRF 22 | hardware is usually fine here |
-| 4K UHD | VAAPI ICQ 22-24, 10-bit, HDR preserved; add `--vf zscale=… ` only if tone-mapping | hardware is strong at 4K |
-| Anything already efficient | score a remux against an encode at the bar | a copy can beat a re-encode |
-
-Concrete bracket (adjust the sample window to the title):
+1. **Classify** the source: DVD / Blu-ray / UHD; film or video; clean or noisy;
+   animation or live action; SDR or HDR.
+2. **Sample** 2–4 minutes from the middle (skip logos, recaps, credits).
+3. **Bracket** three or four candidates from the class ladder below, hardware
+   first.
+4. **Score** each: structural audit, VMAF, butteraugli, and eyeball the worst
+   frames at 1:1 and zoomed.
+5. **Apply the acceptance rule** for that class (§4.6), not a universal number.
+6. **Pick the smallest passing candidate with margin**, and record encoder,
+   quality, filters and the reason in the sidecar and the batch report.
+7. **Reuse** that setting for titles of the same class from the same
+   master/season. **Re-bracket** when the disc changes character.
 
 ```bash
+# candidates for one class; swap the ladder per §4.2–4.4
 for q in 24 22 20; do
   discforge encode "$sample" "$WORK/build/hw-$q.mkv" --action none \
     --encoder av1_vaapi --quality $q --10bit --sidecar "$WORK/reports/hw-$q.job.json"
@@ -261,12 +218,95 @@ for c in 22 20 18; do
   discforge encode "$sample" "$WORK/build/sw-$c.mkv" --action none \
     --encoder svtav1 --preset 4 --quality $c --sidecar "$WORK/reports/sw-$c.job.json"
 done
-# score each: discforge audit (structural) + butteraugli (perceptual) + eyes
+discforge audit "$sample" "$WORK/build/hw-22.mkv" --job … --json …
+butteraugli ref-frames/ out-frames/
 ```
 
-Pick the smallest file that clears the bar with margin, and use that setting for
-the batch. Do not re-bracket per episode; re-bracket per source class (DVD vs
-BD vs UHD, clean vs noisy, film vs video) or when a title looks unusual.
+### 4.2 DVD (480i/480p, MPEG-2)
+
+Expect: soft picture, analogue noise and static, MPEG-2 blocking, banding in
+gradients, telecine and lying frame-rate headers, anamorphic 16:9, 4:3
+pillarboxing, and extras that are themselves interlaced.
+
+**Ladder (hardware first):**
+
+| candidate | settings |
+|---|---|
+| A | `av1_vaapi --blbrc --10bit` ICQ 22 |
+| B | A + `deband` (gradients/animation), + `--denoise light` if the source is noisy TV |
+| C | A at ICQ 20 (when A shows artifacts) |
+| D | `svtav1` preset 6 CRF 20, then 18 (when hardware cannot clear the bar) |
+
+**Acceptance:** VMAF ≥ 96 and p1 ≥ 92; no banding visible on a zoomed gradient
+frame; no new blocking or ringing; interlace fully resolved. Butteraugli around
+1.7–2.0 is **normal for grainy DVD and is not a failure** — the metric is
+penalising removal of the source's own noise, which is wanted here. Do not
+chase 1.5 on DVD; chase the artifacts instead.
+
+Typical outcome: 2–3.5× smaller. Denoise light for analogue noise, never heavy
+denoise on film grain; deband animation and any smooth gradient.
+
+### 4.3 Blu-ray (1080p, H.264/VC-1/MPEG-2)
+
+Expect: already-efficient compression, intentional film grain, 1080i on some TV
+releases, DTS-HD MA/TrueHD audio, PGS subtitles. These are much closer to
+transparent sources than DVD, so the win is smaller and the bar is stricter.
+
+**Ladder:** hardware `--blbrc --10bit` ICQ 22 → 20; software `svtav1` preset 4–6
+CRF 22 → 20. For 1080i, deinterlace properly (`bwdif=deint=all`) before encoding.
+
+**Acceptance:** VMAF ≥ 96, butteraugli ≤ 1.5 typical, grain structure preserved,
+no new artifacts. If the source is already efficient and no encode beats a
+**remux** at that bar, remux — a copy is the best possible encode.
+
+Typical outcome: 1.5–3× smaller. Do not denoise film; deband only where
+gradients band.
+
+### 4.4 UHD 4K (2160p, HEVC, HDR/DV)
+
+Expect: HDR10/HLG/Dolby Vision, 10-bit minimum, and a hardware encoder that is
+genuinely strong at this resolution.
+
+**Ladder:** hardware `--blbrc --10bit` ICQ 22–24 keeping HDR metadata; software
+`svtav1` preset 4 CRF 20–22 only if needed. Tone-map only when the target
+clients cannot play HDR — and say so, because it changes the look.
+
+**Acceptance:** VMAF ≥ 96 in the native pipeline, no banding or crushed
+highlights, HDR metadata intact, verified on an HDR-capable client if possible.
+
+Typical outcome: 1.5–2.5× smaller.
+
+### 4.5 Modifiers that override the ladder
+
+- **Analogue noise / static** (VHS-era, bad broadcast masters): denoise light,
+  then deband. Never let denoise smear faces or destroy fine texture.
+- **Animation / line art**: protect edges. No sharpening, deband gradients,
+  quality one step higher than the ladder.
+- **Very grainy film**: keep grain; if size matters, denoise *gently* and accept
+  a lighter grain rather than plastic skin.
+- **Hybrid content**: per-title treatment (§3), never per-series.
+- **Already efficient**: remux if no encode wins at the bar.
+
+### 4.6 Encoder constraints (do not rediscover these)
+
+- **Intel VAAPI AV1 is the hardware path** (`vainfo` must list `AV1Profile0` with
+  `EncSlice`). Its knobs are `ICQ`, `--blbrc` (~25% at equal quality) and
+  `--10bit`; there is **no preset**. B-series prerequisites, verified: kernel
+  6.12+, the `xe` driver, and **Resizable BAR** (the VRAM aperture BAR should be
+  tens of GiB, not 256 MiB). If ReBAR is off, the media driver can crash the
+  encoder.
+- **QSV is a dead end here** — tested twice (Intel's 24.04/`i915` runtime, and
+  `vpl-gpu-rt` 1.2.17 built from source): both fail with `MFX session: -9` on
+  this 26.04/`xe` stack. Same media engine as VAAPI anyway. Do not rebuild for
+  it.
+- **SVT-AV1 is the software fallback** and the quality-per-bit leader at low
+  rates: preset 4–6 at 480p, 4 at 1080p+.
+- Published comparisons and measurements agree: hardware AV1 is competitive at
+  high bitrates and slips below roughly 2 Mbps; at 480p the Arc has a
+  perceptual floor. At 1080p and 4K it is usually excellent.
+
+**Fallback ladder:** hardware at the ladder's quality → hardware one step higher
+→ software at matched quality → remux. Record which rung you used and why.
 
 ## 5. Encode
 
@@ -303,14 +343,22 @@ Perceptual checks:
 
 - **VMAF** for gross fidelity — necessary but nowhere near sufficient. It rates
   visibly smoothed encodes 95–97.
-- **butteraugli** for perceptual similarity (`~/.local/bin/butteraugli`;
-  1.0 good, 1.5 acceptable, 2.0 bad by its own guidance).
+- **butteraugli** for perceptual similarity (`~/.local/bin/butteraugli`). Its
+  generic scale is 1.0 good / 1.5 acceptable / 2.0 bad, but the **class rule in
+  §4.2–4.4 governs**, not the generic scale: DVD is expected to land near 1.7–2.0
+  because the source's own noise is being removed, while Blu-ray should be ≤1.5
+  and UHD checked against its native pipeline. Chasing 1.5 on a DVD is a waste
+  of time and a route to undersized, smeared encodes.
 - **Control**: a lossless encode (`-c:v libx264 -qp 0`) must score 0.00. If it
   does not, the comparison is wrong.
 - Extract frames as `format=rgb24` on both sides; 10-bit PNGs inflate the score.
 - Interpret with care: butteraugli measures *difference from source*, including
   the removal of the source's own compression noise. A 2.0 can mean "cleaner",
   not "worse". Confirm banding/blocking by eye before rejecting.
+- **Record the decision** for every class you bracket: encoder, quality, filters,
+  why the class rule passed, and what the alternative would have cost. That is
+  what the batch report shows the user, and it is what makes a later disc quick
+  to judge.
 - Look at frames from the worst-scoring moments, zoomed. If the user can see it,
   it is a failure regardless of the number.
 
