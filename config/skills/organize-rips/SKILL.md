@@ -401,6 +401,116 @@ The user asked to be told when it is done, not to watch it. Deliver:
 3. Nothing left running, no `.part` files, no stray frames or contact sheets in
    the library.
 
+## 9. What this library already taught us (do not rediscover)
+
+Everything below was measured on real discs in this container. Trust it over
+intuition, and re-measure only when the content changes class.
+
+### How ARM lays out a disc
+
+```
+<Show>/Season NN/<DISC FOLDER>/
+├── <DISC NAME>.mkv          ← "play all": duration ≈ sum of the episodes
+└── extras/
+    ├── D1_t04.mkv … D6_t09.mkv   ← the ACTUAL EPISODES (20-22 min each)
+    └── B1_t01.mkv, C1_t03.mkv    ← real extras (10 s - 2 min)
+```
+
+- **Do not trust the `extras` folder name.** ARM puts episodes in it. Duration
+  decides what a title is.
+- The play-all is a duplicate; skip it. It also poisons any duration-based
+  heuristic that looks at the disc as a whole.
+- Layouts vary: some discs are play-all only, some seasons have odd names
+  (`the_BiG_BANG_TH`, `..._177128189101`), bonus discs hold one long file.
+  Verify per disc rather than assuming.
+- A typical DVD episode here: MPEG-2 720×480 anamorphic (SAR 853:720), AC3
+  stereo English plus a second language, six DVD bitmap subtitle tracks, five
+  chapters.
+
+### The frame-rate header lies
+
+The container can declare 29.97 while the decoder actually produces 23.98
+(soft telecine in the MPEG-2 flags). Measured: seasons 1–2 read 23.98 actual;
+season 9 reads 29.98 actual. Both declare 29.97.
+
+- Measure cadence by decoding (`frames / seconds`), never by `avg_frame_rate`.
+- `discforge` measures it and adds `-r 24000/1001 -fps_mode cfr` when the header
+  disagrees with the frames, and the audit compares measured rates.
+- Symptom of getting it wrong: a file that claims 29.97 with 24 fps of frames,
+  and a rate check that fails on a perfectly good encode.
+
+### Interlace detection is noisier than it looks
+
+- `idet`'s "Progressive" counter is unreliable; `Undetermined` often dominates
+  even on clean content.
+- Telecine is identified by **repeated fields** (≥0.15), not by combing counts.
+- The combing ratio has a noise floor around 0.8 on detail-heavy material (a
+  bit-identical file measured 0.86), so fail at ≥0.95, warn from ≥0.50, and
+  judge **per ~15 s tile** — a whole-file average hides a localised defect.
+- Calibration test that must pass: audit a file against itself and expect no
+  interlace reason.
+
+### Intel hardware, measured at 480p
+
+- VAAPI AV1 has **no speed/quality preset**. `av1_qsv` is unusable here: the
+  oneVPL GPU runtime is not packaged in Ubuntu 26.04 and MFX session creation
+  fails with `-9`. Do not spend time on QSV.
+- `--blbrc` (block-level rate control) buys ~25% at identical VMAF. `--10bit`
+  costs ~3% and helps gradients, which VMAF cannot see. Both are on by default.
+- The hardware encoder **cannot be transparent for grainy DVD**: butteraugli
+  plateaus at ~1.66 even at ICQ 14, where the file is *larger than the source*.
+- Software SVT-AV1 goes smaller but smooths grain: preset 6 CRF 20 = 207 MB per
+  episode, butteraugli 3.1. Hardware 10-bit ICQ 22 + deband = 325 MB,
+  butteraugli 2.0. Source is 660–730 MB.
+- Film-grain synthesis (`-svtav1-params film-grain=10`) made butteraugli worse
+  (3.6). Do not rely on it without measuring.
+
+### Quality: VMAF is necessary, not sufficient
+
+VMAF rated every variant above 95–97 while butteraugli separated them by a
+visible margin. Use both, and keep a control:
+
+- `butteraugli` is installed at `~/.local/bin/butteraugli` (1.0 good, 1.5
+  acceptable, 2.0 bad by its own guidance). It lives on the durable `~/.local`
+  mount; if it is ever missing, `cargo install butteraugli-cli` restores it in
+  about 15 seconds.
+- **Control that must read 0.00**: encode a clip losslessly (`-c:v libx264
+  -qp 0`) and compare. If it is not ~0, your extraction is wrong, not the encode.
+- Extract frames on both sides as `format=rgb24`; 10-bit PNGs inflate the score.
+- Sample ~1 frame per 5 s for a whole episode; a 3-minute sample is enough to
+  shortlist settings.
+- Note what the metric means: butteraugli measures *difference from source*,
+  including the removal of the DVD's own MPEG-2 noise. A 2.0 is "different",
+  not automatically "artifacts" — confirm banding/blocking by eye on the target
+  screen before rejecting an encode.
+- `discforge-banding` is a supplementary heuristic for plateau/banding
+  structure; it is not a standard metric and never overrides the two above.
+
+### Cost and mechanics
+
+- Encode into `$DISCFORGE_WORK` (NVMe pool), move only finished, audited files
+  into `/mnt/handoff` (array, parity-protected). Never leave intermediates,
+  `.part` files, sidecars or reports on the array.
+- Audit costs several full decodes per title (frame count, freezes, interlace
+  tiles, VMAF, butteraugli): budget ~3–5 minutes per 22-minute episode at 480p.
+- Encode speed: hardware ≈ 1 min/episode, SVT preset 6 ≈ 3.5 min, preset 4
+  ≈ 12 min. Hardware also uses roughly a tenth of the energy.
+- Freezes that exist in the master (end-of-episode holds, black frames) are not
+  encode faults; the audit compares against the source and only fails new ones.
+- Sidecars must travel with the audit (`--job`); the audit refuses a sidecar
+  whose source fingerprint does not match, which is the guard against auditing
+  against the wrong filter chain.
+
+### If a batch has never been run before
+
+1. Run `discforge probe` and `classify` on one disc; confirm the cadence and
+   interlace verdict match the tables above.
+2. Encode a 3-minute sample at two settings; score both with VMAF **and**
+   butteraugli plus the lossless control.
+3. Put the winners in `/mnt/handoff/_review/<show>/` and have the user watch
+   before committing to hundreds of episodes. Metrics disagree; eyes decide.
+4. Then run the batch with the chosen settings and report per-title results.
+
 ## Gotchas
 
 - **Never** write to the input mount, even a thumbnail.
@@ -415,3 +525,11 @@ The user asked to be told when it is done, not to watch it. Deliver:
   the number means the same thing.
 - **Trust the audit over the encoder.** A hardware encode that scores below the
   bar is a failed encode, not a successful fast one.
+- **Trust measured cadence over the header.** Soft-telecined DVDs declare 29.97
+  and carry 23.98; normalise the output or the metadata lies forever.
+- **Never trust ARM's `extras/` folder** to contain extras. It usually holds the
+  episodes; classify by runtime.
+- **Never average interlace statistics over a whole file**; tile it.
+- **Never accept VMAF alone** as proof of visual quality. Run butteraugli and,
+  when in doubt, look at the picture.
+- **QSV is a dead end in this image**; use VAAPI.
