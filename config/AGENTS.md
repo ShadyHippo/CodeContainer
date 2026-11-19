@@ -4,6 +4,25 @@ A single Ubuntu 26.04 container on a home NAS (UnRaid), reached over Tailscale.
 T3 Code drives you (OpenCode) headlessly. There is **no GUI and no `localhost`
 a human can see** — you show work by binding a port and handing the user a link.
 
+## Preserve every audio and subtitle track
+
+**Never drop an audio or subtitle track unless the user explicitly asks for it
+in that request.** This is a standing rule, not a default to be traded away for
+size, tidiness or "compatibility".
+
+- Keep every language and every format: AC3, EAC3, DTS, DTS-HD MA, TrueHD, PCM,
+  Opus, AAC; SRT, ASS, PGS and DVD/VobSub bitmap subtitles.
+- A transcode maps everything (`-map 0:v:0 -map 0:a? -map 0:s?`) and copies the
+  non-video streams (`-c:a copy -c:s copy`). "Clean up the tracks" is never
+  something to do on your own initiative, and a single-track output is a bug
+  unless asked for.
+- If a target container or codec genuinely cannot carry a stream, stop and say
+  so. Do not silently drop it to make the command succeed.
+- If a job's output has fewer audio or subtitle tracks than its source, treat
+  the job as failed, whatever the file looks like.
+- Bitmap subtitles are not a reason to prune: copy them. Converting or OCRing
+  them is a separate, explicitly requested task.
+
 ## A question is a question, not a work order
 
 When the user asks a question — "is there a way to…", "what happens if…",

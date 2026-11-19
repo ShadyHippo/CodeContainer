@@ -182,10 +182,15 @@ lower it mid-batch to save time.
   raises the metrics and lowers the bitrate while removing real detail — when
   in doubt, leave it off. Grain is part of the film; the user asked for no
   *artifacts*, not for a grain-free picture.
-- **Audio**: `--audio copy` unless the user named a client problem. Copying DTS-HD
-  and TrueHD is correct; transcoding them silently is not.
-- **Subtitles**: `copy`. DVD VobSub and PGS survive into MKV. Do not OCR unless
+- **Audio**: `--audio copy`, always. **Preserve every audio track, every
+  language** — this is a standing instruction, not a size trade-off. Copying
+  DTS-HD, TrueHD and dual-language AC3 is the correct outcome; transcoding,
+  downmixing or dropping a track requires the user to ask for it explicitly.
+- **Subtitles**: `copy`, every track, every language, including DVD VobSub and
+  PGS bitmap subtitles. Never prune them to save space. Do not OCR unless
   asked — it is slow, lossy and needs review.
+- Verify afterwards that the output has **at least** the source's audio and
+  subtitle track counts; the audit checks this and a drop fails the job.
 - **Anamorphic DVD**: keep 720×480 and its SAR. Do not upscale, do not stretch.
 
 ## 5. Encode
