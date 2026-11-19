@@ -200,13 +200,27 @@ per title, not habit.
   `AV1Profile0` with `EncSlice`). VAAPI has **no speed/quality preset** — the
   knobs are `ICQ`, `--blbrc` (~25% smaller at equal quality), `--10bit`
   (gradients/banding) and, on 4K, tile counts.
+- **Arc B-series prerequisites**, straight from Jellyfin's Intel HWA docs and
+  verified here: Linux kernel **6.12+** (6.18 in use), the **`xe`** driver
+  instead of `i915` (GuC/HuC and low-power encode are automatic on `xe`), and
+  **Resizable BAR, which is mandatory for B-series** — without it the media
+  driver crashes the encoder. Check it by listing the GPU's PCI BARs: the VRAM
+  aperture should be tens of GiB (16 GiB here), not 256 MiB.
+  ```bash
+  for i in 0 1 2 3; do stat -Lc "%n %s" /sys/bus/dri/*/device/resource$i 2>/dev/null; done
+  ```
+  Also confirm the GPU is really doing the work: encode speed (seconds, not
+  minutes) or `intel_gpu_top` showing Video/VideoEnhance busy.
 - **QSV is a dead end on this system, and it is not for want of packages.**
-  Intel's GPU repo does ship the oneVPL GPU runtime (`libmfxgen1`,
-  `libvpl-tools`); installing it still fails with `MFX session: -9` because the
-  runtime is built for 24.04/`i915` while this kernel uses `xe`. QSV and VAAPI
-  drive the *same* media engine anyway, so the only thing lost is QSV's preset
-  names. Do not spend a rebuild on it; revisit only if Intel ships a `xe`-era
-  runtime.
+  Jellyfin's own docs prefer QSV on Linux for performance and tuning, so this
+  was tested properly, twice:
+  - Intel's GPU repo ships `libmfxgen1` 24.2.4 (a 24.04/`i915` build); installed,
+    it fails with `MFX session: -9` on this 26.04/`xe` stack.
+  - Building the current oneVPL GPU runtime (`vpl-gpu-rt` 1.2.17) from source
+    and installing it to `/usr/local` fails identically.
+  QSV and VAAPI drive the *same* media engine, so the only thing missing is
+  QSV's preset names and extbrc. Do not spend a rebuild on it; revisit when
+  Intel ships a `xe`-era runtime. VAAPI is fully supported and is what we use.
 - **SVT-AV1 (software)** is the fallback, and the quality-per-bit leader at low
   bitrates. Preset 4–6 at 480p, 4 at 1080p and above, 10-bit.
 
