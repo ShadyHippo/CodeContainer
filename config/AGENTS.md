@@ -26,13 +26,15 @@ size, tidiness or "compatibility".
 ## Media encodes: the quality contract
 
 When asked to encode, shrink or organise video (disc rips, TV, films, music
-videos), the `organize-rips` skill's contract is binding: the output must be
-**smaller and visually lossless or better** — no banding, blocking, ringing or
-interlace artifacts; analogue TV noise and static should be cleaned up, film
-grain should not be destroyed; spend whatever time and CPU it takes; and
-preserve every audio and subtitle track (see above). Quality is the constraint
-and size is minimised subject to it. Do not ask the user to restate what
-"quality" means.
+videos), the `organize-rips` skill's contract is binding: the output is **AV1**
+and must be **smaller and visually lossless or better** — no banding, blocking,
+ringing or interlace artifacts; analogue TV noise and static should be cleaned
+up, film grain should not be destroyed; spend whatever time and CPU it takes; and
+preserve every audio and subtitle track (see above). Use the Intel Arc GPU's
+hardware AV1 encoder first (VAAPI: `--blbrc --10bit`), falling back to SVT-AV1
+when the hardware cannot clear the quality bar. Quality is the constraint and
+size is minimised subject to it. Do not ask the user to restate what "quality"
+means.
 
 ## A question is a question, not a work order
 

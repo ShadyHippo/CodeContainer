@@ -15,6 +15,9 @@ Working out what was done to a recording is your job, not theirs.
 This is the user's standing definition of "good". Do not re-litigate it per
 batch, and do not ask what quality means.
 
+- **The output is AV1.** Not x265, not x264, not "AV1 if the GPU is free".
+  If a source cannot be AV1 (rare: exotic pix_fmt), stop and say so rather
+  than silently substituting another codec.
 - **Output must be smaller than the source.** That is the point of the exercise.
 - **Visually lossless or better.** If the source is bad, the output may be
   *better* (denoised, deinterlaced) — but never worse.
@@ -188,28 +191,68 @@ quality*, not picking a CRF and hoping.
 title, try two or three settings, score each (§6), and pick the smallest that
 clears the bar with margin. Then use that setting for the batch.
 
-Encoder selection:
+**Always try Intel hardware first.** The user's standing preference is to use
+the Arc GPU: it is ~10× cheaper in energy and 3–5× faster, which matters across
+a library. It is still gated by the quality contract, so let measurements decide
+per title, not habit.
 
-- **Intel VAAPI AV1** when the GPU works (`vainfo` shows `AV1Profile0` with
-  `EncSlice`): fastest, lowest energy. VAAPI has **no preset knob** — quality is
-  `ICQ` plus `--blbrc` (block-level rate control, worth ~25% at equal quality)
-  and `--10bit`. `av1_qsv` is not usable here (no oneVPL runtime); do not chase
-  it.
-- **SVT-AV1** on CPU when the GPU is unavailable, or when size matters more
-  than time. Preset 4–6 at 480p, 4 at 1080p and above.
-- **Never encode blindly with the hardware encoder at low resolution.** It has a
-  perceptual floor: on grainy 480p DVD it cannot reach transparency at any
-  bitrate, and beyond a point the file gets larger than the source. Measure it
-  rather than assuming either way; on 1080p/4K it is usually excellent.
+- **Intel VAAPI AV1** is the working hardware path (`vainfo` must list
+  `AV1Profile0` with `EncSlice`). VAAPI has **no speed/quality preset** — the
+  knobs are `ICQ`, `--blbrc` (~25% smaller at equal quality), `--10bit`
+  (gradients/banding) and, on 4K, tile counts.
+- **QSV is a dead end on this system, and it is not for want of packages.**
+  Intel's GPU repo does ship the oneVPL GPU runtime (`libmfxgen1`,
+  `libvpl-tools`); installing it still fails with `MFX session: -9` because the
+  runtime is built for 24.04/`i915` while this kernel uses `xe`. QSV and VAAPI
+  drive the *same* media engine anyway, so the only thing lost is QSV's preset
+  names. Do not spend a rebuild on it; revisit only if Intel ships a `xe`-era
+  runtime.
+- **SVT-AV1 (software)** is the fallback, and the quality-per-bit leader at low
+  bitrates. Preset 4–6 at 480p, 4 at 1080p and above, 10-bit.
 
-Starting points (verify by measurement, do not trust):
+What the evidence says about quality per bit (published comparisons plus
+measurements here):
 
-| source | encoder | start at |
+- Hardware AV1 is competitive at high bitrates and **slips below roughly
+  2 Mbps**; matched-quality comparisons put SVT-AV1 ahead at low rates, with
+  fewer artifacts on hard content.
+- libaom is marginally better than SVT but 3–5× slower; not worth it for a
+  library.
+- At 480p the Arc encoder has a perceptual floor — on grainy DVD it cannot reach
+  transparency at *any* bitrate (butteraugli plateaued ~1.66 while the file grew
+  larger than the source). At 1080p and 4K it is usually excellent.
+
+So: hardware first for every title, fall back to SVT when the hardware cannot
+clear the gate at a sane size, and record which was used and why.
+
+**Starting points for the test matrix** (run these on the sample, then pick):
+
+| source | try, in this order | why |
 |---|---|---|
-| DVD 480p film | SVT preset 6 / VAAPI ICQ 22 + `--blbrc --10bit` | CRF 20 / ICQ 22 |
-| DVD 480p noisy TV | as above + light denoise + deband | one step higher quality |
-| Blu-ray 1080p | VAAPI ICQ 22 or SVT preset 4–6 | CRF 22 |
-| 4K UHD | VAAPI ICQ 22–24; keep HDR, 10-bit mandatory | measure tone-mapping need |
+| DVD 480p, clean film | VAAPI `--10bit --blbrc` ICQ 22, then 20 | fast; raise quality until it passes |
+| DVD 480p, noisy/soft TV | same + `--denoise light` + `deband`, ICQ 20-22 | noise removal is wanted, banding prevented |
+| DVD 480p where hardware fails the gate | SVT preset 6 CRF 20, then 18 | software wins per bit at low rates |
+| Blu-ray 1080p | VAAPI `--10bit --blbrc` ICQ 22, then SVT preset 4 CRF 22 | hardware is usually fine here |
+| 4K UHD | VAAPI ICQ 22-24, 10-bit, HDR preserved; add `--vf zscale=… ` only if tone-mapping | hardware is strong at 4K |
+| Anything already efficient | score a remux against an encode at the bar | a copy can beat a re-encode |
+
+Concrete bracket (adjust the sample window to the title):
+
+```bash
+for q in 24 22 20; do
+  discforge encode "$sample" "$WORK/build/hw-$q.mkv" --action none \
+    --encoder av1_vaapi --quality $q --10bit --sidecar "$WORK/reports/hw-$q.job.json"
+done
+for c in 22 20 18; do
+  discforge encode "$sample" "$WORK/build/sw-$c.mkv" --action none \
+    --encoder svtav1 --preset 4 --quality $c --sidecar "$WORK/reports/sw-$c.job.json"
+done
+# score each: discforge audit (structural) + butteraugli (perceptual) + eyes
+```
+
+Pick the smallest file that clears the bar with margin, and use that setting for
+the batch. Do not re-bracket per episode; re-bracket per source class (DVD vs
+BD vs UHD, clean vs noisy, film vs video) or when a title looks unusual.
 
 ## 5. Encode
 
