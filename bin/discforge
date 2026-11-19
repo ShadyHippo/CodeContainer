@@ -401,7 +401,11 @@ def build_encode_command(
     denoise: str,
     audio: str,
     vaapi_device: str,
-    threads: int | None,
+    ten_bit: bool = False,
+    blbrc: bool = True,
+    b_depth: int = 1,
+    async_depth: int = 8,
+    threads: int | None = None,
     extra_vf: list[str] | None = None,
     metadata: dict[str, str] | None = None,
     remux: bool = False,
@@ -421,10 +425,21 @@ def build_encode_command(
 
         if encoder == "av1_vaapi":
             cmd += ["-vaapi_device", vaapi_device]
-            chain = video_filters + ["format=nv12", "hwupload"]
+            # 10-bit costs ~3% size and buys banding headroom, which VMAF does
+            # not measure but DVD gradients show immediately.
+            pixel = "p010le" if ten_bit else "nv12"
+            chain = video_filters + [f"format={pixel}", "hwupload"]
             cmd += ["-vf", ",".join(chain)]
             cmd += ["-c:v", "av1_vaapi", "-rc_mode", "ICQ",
-                    "-global_quality", str(quality), "-b_depth", "1"]
+                    "-global_quality", str(quality),
+                    "-b_depth", str(b_depth), "-async_depth", str(async_depth)]
+            if blbrc:
+                # Block-level rate control: ~25% smaller at identical VMAF on
+                # this hardware. VAAPI has no speed preset, so this is the
+                # efficiency knob that matters.
+                cmd += ["-blbrc", "1"]
+            if ten_bit:
+                cmd += ["-profile", "main"]
         elif encoder == "svtav1":
             chain = video_filters + ["format=yuv420p"]
             cmd += ["-vf", ",".join(chain)]
@@ -513,6 +528,8 @@ def cmd_encode(args: argparse.Namespace) -> int:
         action="none" if args.remux else action,
         encoder=args.encoder, quality=args.quality, preset=args.preset,
         denoise=args.denoise, audio=args.audio, vaapi_device=args.vaapi_device,
+        ten_bit=args.ten_bit, blbrc=args.blbrc, b_depth=args.b_depth,
+        async_depth=args.async_depth,
         threads=args.threads, extra_vf=args.vf, metadata=metadata,
         remux=args.remux,
     )
@@ -528,6 +545,8 @@ def cmd_encode(args: argparse.Namespace) -> int:
         "quality": args.quality,
         "preset": args.preset,
         "audio": args.audio,
+        "ten_bit": args.ten_bit,
+        "blbrc": args.blbrc,
         "command": cmd,
     }
 
@@ -1116,6 +1135,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--vf", action="append", default=None, help="extra video filters")
     p.add_argument("--meta", action="append", default=None, help="key=value metadata")
     p.add_argument("--vaapi-device", default=DEFAULT_VAAPI)
+    p.add_argument("--10bit", dest="ten_bit", action="store_true",
+                   help="encode VAAPI AV1 at 10-bit (better banding on DVD; ~3%% larger)")
+    p.add_argument("--blbrc", action=argparse.BooleanOptionalAction, default=True,
+                   help="block-level rate control for av1_vaapi (default on; ~25%% smaller)")
+    p.add_argument("--b-depth", type=int, default=1)
+    p.add_argument("--async-depth", type=int, default=8)
     p.add_argument("--threads", type=int, default=None)
     p.add_argument("--sidecar", default=None)
     p.add_argument("--samples", type=int, default=3, help="classify samples when --action auto")

@@ -146,9 +146,20 @@ There is no global profile. Choose per title and record why in the sidecar.
 
 | situation | encoder | notes |
 |---|---|---|
-| GPU healthy | `av1_vaapi` | `vainfo --device /dev/dri/renderD128` must list AV1 encode. Fast; ICQ rate control |
-| GPU absent/wedged | `svtav1` | `preset 4` for 480p (quality first), `4–6` for 1080p. Slower but better per bit at 480p |
+| GPU healthy | `av1_vaapi` | `vainfo --device /dev/dri/renderD128` must list `AV1Profile0` **EncSlice**. Use `--blbrc --10bit` |
+| GPU absent/wedged | `svtav1` | `preset 6` for 480p, `4–6` for 1080p. ~15% smaller than VAAPI at equal VMAF, ~3.5× slower |
 | Must match an existing library | `x265` | only when compatibility beats efficiency |
+
+**Hardware notes learned the hard way:**
+
+- VAAPI AV1 has **no speed or quality preset**. `-preset` is not a thing here;
+  ICQ is the only quality knob. `--blbrc` (block-level rate control) is the
+  efficiency knob and is worth roughly 25% at identical VMAF — keep it on.
+- `--10bit` (`p010le`, profile main) costs ~3% size and buys banding headroom,
+  which VMAF does not measure but DVD gradients show immediately. On for DVD.
+- `av1_qsv` is *not* usable in this image: the oneVPL GPU runtime
+  (`libmfx-gen`) is not packaged in Ubuntu 26.04, so MFX session creation fails
+  with `-9`. Do not burn time on QSV presets; VAAPI is the supported path.
 
 Check the GPU once per batch, and never retry it in a loop:
 
@@ -164,13 +175,19 @@ they do not care how long an encode takes, only that the library is AV1, looks
 as good as the disc, and carries no interlace, blocking or smeared grain. When
 in doubt, spend the bits and take the slower preset.
 
-| source | encoder | quality | why |
+| source | encoder | quality | measured on a real DVD episode (3-min sample, audio included) |
 |---|---|---|---|
-| DVD 480p | `svtav1` preset 4 | CRF 22-24 | software wins per bit at 480p; hardware AV1 is tuned for 1080p |
-| DVD 480p | `av1_vaapi` | ICQ 24 | only if it clears the gate; verify with VMAF, do not assume |
-| Blu-ray 1080p | `svtav1` preset 4-6 | CRF 22-24 | best quality per bit when time is free |
-| Blu-ray 1080p | `av1_vaapi` | ICQ 22 | hardware sweet spot, much faster |
+| DVD 480p | `av1_vaapi` + `--blbrc` | ICQ 24 | 32.2 MB, VMAF 95.7, ~8 s → ~1 min/episode, lowest energy |
+| DVD 480p | `av1_vaapi` + `--blbrc` | ICQ 22 | ~43 MB, VMAF 96.5, ~8 s (use when the gate demands more) |
+| DVD 480p | `svtav1` | CRF 20 | 31.1 MB, VMAF 96.6, 28 s → best size per bit |
+| Blu-ray 1080p | `av1_vaapi` + `--blbrc` | ICQ 22-24 | hardware is in its element here |
+| Blu-ray 1080p | `svtav1` preset 4-6 | CRF 22-24 | when the GPU is down or the last few percent matter |
 | Anything already efficient | `--remux` | — | no re-encode at all; a lossless copy beats a re-encode |
+
+Pick hardware when the library is large or power matters (roughly 10× less
+energy per title: ~8 s of GPU versus ~28 s of all-core CPU). Pick software when
+you want the smallest file at equal VMAF. Both pass the same gate, so this is a
+cost choice, not a quality one.
 
 A failed gate is cheaper than a bad library entry: re-encode lower before
 accepting a marginal score, and only ever *raise* the quality target, never
@@ -289,17 +306,46 @@ Move with a rename, never a copy-then-delete across filesystems when `mv` works.
 **Television**
 
 ```
-Show (Year)/Season 01/Show (Year) - S01E01 - Episode Title.mkv
-Show (Year)/Season 00/Show (Year) - S00E01 - Special Title.mkv
-Show (Year)/Extras/Featurette Name.mkv
+Show (Year)/
+├── Season 01/
+│   ├── Show (Year) - S01E01 - Episode Title.mkv
+│   ├── extras/                     ← unclassified extras from season 1 discs
+│   ├── featurettes/                ← making-ofs
+│   ├── trailers/                   ← trailers and promos
+│   └── interviews/
+├── Season 00/
+│   └── Show (Year) - S00E01 - Special Title.mkv
+└── extras/                         ← show-wide extras (e.g. a bonus disc)
 ```
 
 **Movies**
 
 ```
-Film (Year)/Film (Year).mkv
-Film (Year)/Extras/Featurette Name.mkv
+Film (Year)/
+├── Film (Year).mkv
+├── extras/
+└── featurettes/
 ```
+
+**Extras: the rules Jellyfin actually implements** (from its media docs):
+
+- The recognised folder names are `extras`, `featurettes`, `trailers`, `clips`,
+  `interviews`, `behind the scenes`, `deleted scenes`, `scenes`, `shorts`,
+  `samples`, `other`. Use those spellings; `extras` and `other` are the generic
+  catch-alls.
+- Extras folders are honoured at **series**, **season** and **movie** level.
+  Put a disc's extras on the season whose discs produced them; only use the
+  series-level folder for show-wide material (a bonus disc, a reunion special).
+- **Never leave extras loose in a Season folder.** Jellyfin parses loose video
+  files there as episodes; a 90-second promo becomes S01E05 and shifts nothing
+  but looks wrong forever.
+- The **filename becomes the extra's title** in the UI. Use a human-readable
+  name ("Season 2 - Disc 1 - Gag Reel"), never `B1_t01`.
+- The `-featurette`, `-trailer`, `-interview`, `-behindthescenes`, `-deleted`
+  suffixes exist for the case where an extra belongs to **one specific
+  episode**; then attach it to that episode's filename. For disc extras we
+  cannot attribute an item to an episode, so prefer the folder form.
+- Bitmap or foreign-language extras are still extras: preserve their tracks.
 
 - Episode titles come from TMDB, sanitised: no `/`, `:`, `?`, `*`; keep the
   apostrophes and dashes.
