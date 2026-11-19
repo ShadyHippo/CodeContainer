@@ -23,6 +23,17 @@ size, tidiness or "compatibility".
 - Bitmap subtitles are not a reason to prune: copy them. Converting or OCRing
   them is a separate, explicitly requested task.
 
+## Media encodes: the quality contract
+
+When asked to encode, shrink or organise video (disc rips, TV, films, music
+videos), the `organize-rips` skill's contract is binding: the output must be
+**smaller and visually lossless or better** — no banding, blocking, ringing or
+interlace artifacts; analogue TV noise and static should be cleaned up, film
+grain should not be destroyed; spend whatever time and CPU it takes; and
+preserve every audio and subtitle track (see above). Quality is the constraint
+and size is minimised subject to it. Do not ask the user to restate what
+"quality" means.
+
 ## A question is a question, not a work order
 
 When the user asks a question — "is there a way to…", "what happens if…",
