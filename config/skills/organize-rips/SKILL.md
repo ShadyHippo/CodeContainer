@@ -150,6 +150,26 @@ There is no global profile. Choose per title and record why in the sidecar.
 | GPU absent/wedged | `svtav1` | `preset 6` for 480p, `4–6` for 1080p. ~15% smaller than VAAPI at equal VMAF, ~3.5× slower |
 | Must match an existing library | `x265` | only when compatibility beats efficiency |
 
+**Perceptual QA, and why VMAF is not enough:** VMAF scores 95-97 on encodes
+that butteraugli rates "bad". Use both:
+
+```bash
+# mean over sampled frames; guidance: 1.0 good, 1.5 acceptable, 2.0 bad
+butteraugli ref-dir/ dist-dir/
+```
+
+Extract matching frames from both sides with
+`-vf "select='not(mod(n\,150))',format=rgb24" -vsync 0 dir/%04d.png`. A
+lossless encode (`-c:v libx264 -qp 0`) must read 0.00 - if it does not, the
+comparison pipeline is wrong, not the encode.
+
+Banding is the artifact VMAF hides best. Prevention, in order of value: 10-bit
+output, `deband` filter, and enough bitrate. Batches on this library showed
+hardware 10-bit + `deband` at ICQ 22 as the best perceptual result per byte;
+software SVT at CRF 20 was 35% smaller but butteraugli 3.1 (grain smoothed
+away), which is a visible change. AV1 film-grain synthesis did not help here
+in testing.
+
 **Hardware notes learned the hard way:**
 
 - VAAPI AV1 has **no speed or quality preset**. `-preset` is not a thing here;
@@ -177,8 +197,9 @@ in doubt, spend the bits and take the slower preset.
 
 | source | encoder | quality | measured on a real DVD episode (3-min sample, audio included) |
 |---|---|---|---|
-| DVD 480p | `av1_vaapi` + `--blbrc` | ICQ 24 | 32.2 MB, VMAF 95.7, ~8 s → ~1 min/episode, lowest energy |
-| DVD 480p | `av1_vaapi` + `--blbrc` | ICQ 22 | ~43 MB, VMAF 96.5, ~8 s (use when the gate demands more) |
+| DVD 480p | `av1_vaapi` + `--blbrc --10bit` | ICQ 22 + `deband` | **preferred**: 325 MB / 22 min (2.3x smaller), VMAF 96.6, butteraugli 2.0 |
+| DVD 480p | `av1_vaapi` + `--blbrc` | ICQ 24 | 223 MB (3.3x), VMAF 95.4 - smaller, visibly smoothed: only when space matters |
+| DVD 480p | `av1_vaapi` + `--blbrc --10bit` | ICQ 18-20 | 470-510 MB (1.4x): only when the user asks for maximum fidelity |
 | DVD 480p | `svtav1` | CRF 20 | 31.1 MB, VMAF 96.6, 28 s → best size per bit |
 | Blu-ray 1080p | `av1_vaapi` + `--blbrc` | ICQ 22-24 | hardware is in its element here |
 | Blu-ray 1080p | `svtav1` preset 4-6 | CRF 22-24 | when the GPU is down or the last few percent matter |

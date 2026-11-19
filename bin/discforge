@@ -153,6 +153,23 @@ def quick_fingerprint(path: str) -> str:
     return h.hexdigest()[:32]
 
 
+def measure_rate(path: str, window: float = 8.0) -> float | None:
+    """Frames per second actually decoded, not what the container claims.
+
+    Soft-telecined DVDs declare 29.97 while carrying 23.976 frames. Trusting
+    the header produces files whose metadata lies about the cadence.
+    """
+    proc = run([
+        which("ffmpeg"), "-hide_banner", "-nostdin", "-v", "info",
+        "-t", str(window), "-i", path, "-map", "0:v:0", "-an", "-f", "null", "-",
+    ])
+    counts = re.findall(r"frame=\s*(\d+)", proc.stderr)
+    if not counts:
+        return None
+    frames = int(counts[-1])
+    return frames / window if frames else None
+
+
 def stream_kind(stream: dict) -> str:
     return stream.get("codec_type", "?")
 
@@ -222,6 +239,7 @@ def profile(path: str) -> dict:
             "sar": video.get("sample_aspect_ratio"),
             "dar": video.get("display_aspect_ratio"),
             "fps": parse_rate(video.get("avg_frame_rate")),
+            "fps_measured": measure_rate(path),
             "r_fps": parse_rate(video.get("r_frame_rate")),
             "field_order": video.get("field_order"),
             "pix_fmt": video.get("pix_fmt"),
@@ -394,6 +412,7 @@ def build_encode_command(
     src: str,
     dst: str,
     *,
+    rate: str | None = None,
     action: str,
     encoder: str,
     quality: int,
@@ -475,6 +494,8 @@ def build_encode_command(
 
         cmd += ["-c:s", "copy"]
 
+    if rate:
+        cmd += ["-r", rate, "-fps_mode", "cfr"]
     if threads:
         cmd += ["-threads", str(threads)]
     for key, value in (metadata or {}).items():
@@ -510,6 +531,19 @@ def cmd_encode(args: argparse.Namespace) -> int:
     if args.remux and (args.denoise != "none" or args.vf):
         die("--remux copies the streams; --denoise and --vf cannot apply")
 
+    src_profile = profile(args.src)
+    measured = src_profile["video"].get("fps_measured")
+    rate = None
+    if measured:
+        # Only rewrite the rate when the container disagrees with the frames.
+        declared = src_profile["video"].get("fps") or 0
+        for nominal in ("24000/1001", "25", "30000/1001"):
+            target = parse_rate(nominal)
+            if target and abs(measured - target) / target < 0.01:
+                if abs(declared - target) / target > 0.02:
+                    rate = nominal
+                break
+
     if args.remux and action != "none":
         # A stream copy cannot remove pulldown or combing; recording the
         # classification while copying would make the audit compare against a
@@ -527,6 +561,7 @@ def cmd_encode(args: argparse.Namespace) -> int:
         args.src, args.dst,
         action="none" if args.remux else action,
         encoder=args.encoder, quality=args.quality, preset=args.preset,
+        rate=rate,
         denoise=args.denoise, audio=args.audio, vaapi_device=args.vaapi_device,
         ten_bit=args.ten_bit, blbrc=args.blbrc, b_depth=args.b_depth,
         async_depth=args.async_depth,
@@ -539,6 +574,7 @@ def cmd_encode(args: argparse.Namespace) -> int:
         "source": profile(args.src),
         "fingerprint": quick_fingerprint(args.src),
         "action": "none" if args.remux else action,
+        "rate": rate,
         "denoise": args.denoise,
         "vf": list(args.vf or []),
         "encoder": "copy" if args.remux else args.encoder,
@@ -795,8 +831,10 @@ def cmd_audit(args: argparse.Namespace) -> int:
 
     src_frames = count_frames(args.src, src_profile["video"].get("index"))
     out_frames = count_frames(args.out, out_profile["video"].get("index"))
-    out_fps = out_profile["video"]["fps"] or 0
-    src_fps = src_profile["video"]["fps"] or 0
+    src_fps = (src_profile["video"].get("fps_measured")
+               or src_profile["video"]["fps"] or 0)
+    out_fps = (out_profile["video"].get("fps_measured")
+               or out_profile["video"]["fps"] or 0)
 
     action = args.action or sidecar.get("action") or "none"
     # The reference must pass through the SAME chain the encode used, denoise
@@ -817,6 +855,8 @@ def cmd_audit(args: argparse.Namespace) -> int:
         "output_frames": out_frames,
         "source_fps": round(src_fps, 3),
         "output_fps": round(out_fps, 3),
+        "source_fps_declared": round(src_profile["video"]["fps"] or 0, 3),
+        "output_fps_declared": round(out_profile["video"]["fps"] or 0, 3),
         "source_duration": round(src_profile["duration"], 3),
         "output_duration": round(out_profile["duration"], 3),
         "size_in": src_profile["size"],
@@ -952,7 +992,21 @@ def cmd_audit(args: argparse.Namespace) -> int:
     freezes = detect_freezes(args.out, args.freeze_seconds, out_duration)
     metrics["freezes"] = freezes
     if freezes:
-        reasons.append(f"{len(freezes)} freeze(s) >= {args.freeze_seconds}s in output")
+        # A black hold or end-of-episode freeze is usually in the master. Only
+        # a freeze the source does not have is an encode fault.
+        src_freezes = detect_freezes(args.src, args.freeze_seconds,
+                                     src_profile["duration"] or 0.0)
+        metrics["source_freezes"] = src_freezes
+
+        def inherited(freeze: dict) -> bool:
+            return any(abs(freeze["start"] - s["start"]) <= 0.5 for s in src_freezes)
+
+        new = [f for f in freezes if not inherited(f)]
+        metrics["new_freezes"] = new
+        if new:
+            reasons.append(
+                f"{len(new)} freeze(s) >= {args.freeze_seconds}s that the source "
+                f"does not have")
 
     # --- quality ------------------------------------------------------------
     vmaf = None
