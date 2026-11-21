@@ -187,6 +187,19 @@ Run dev servers and anything long-lived under `tmux` (`tmux new -s work`) or
 background it properly. Work that dies with your shell is work the user cannot
 see.
 
+**Long jobs get a status update every 20 minutes.** For anything expected to run
+more than an hour — encodes, imports, migrations, builds — post a short update in
+the thread on a 20-minute cadence: state (`RUNNING`/`DONE`), counts done vs total,
+what is running right now, and anything needing a decision. Do not go quiet while
+investigating a problem; a two-line "still going" is what is wanted. A recurring
+scheduled task bound to the thread is the reliable mechanism — delete it when the
+job finishes.
+
+When handing files to the user on a shared volume, leave them usable:
+`chown -R nobody:users` and `chmod -R a+rwX` (capital X keeps directories `777`
+and files `666`) before saying it is done. Root-owned output is readable but the
+user's file manager cannot move it, which reads as "permissions are broken".
+
 ## Building container images
 
 You can **build and push** images, but you have **no Docker daemon and no

@@ -433,3 +433,96 @@ this.
 - Audit cost: several full decodes per title, ~3–5 min per 22-minute episode.
 - VMAF rated every candidate above 95; butteraugli separated them by a visibly
   meaningful margin. Both are required.
+
+## Appendix B: running a whole series (batch operations)
+
+Evidence from a 12-season, 279-episode, 35-disc job. These are the things that
+held up, and the traps that cost hours.
+
+### B.1 How to judge quality, in order
+
+1. **Structure first.** Frame count, measured fps, geometry/SAR, audio and
+   subtitle track counts, duration. A title that fails here is broken no matter
+   what the perceptual score says.
+2. **Mean fidelity second.** Mean VMAF (or XPSNR when VMAF is unavailable) is
+   the gate that tracks visible quality.
+3. **Worst frames third, by eye, at 1:1.** This is the only step that settles a
+   disagreement between metrics, and it is required before any title is
+   accepted below the class bar.
+4. **butteraugli last, as a tiebreaker.** It is noisy and misalignment-sensitive;
+   it ranks candidates, it does not gate them.
+
+**Percentile scores are unreliable on low-luma content.** Fades to black, night
+scenes and lamp-lit interiors score badly on p1 and butteraugli on frames that
+are visually identical, because those metrics amplify small differences in dark
+areas. If a title fails *only* on p1 while the mean is comfortable, look at the
+worst frames before spending an encode. If pushing quality several steps harder
+does not move p1, that is proof it was never a bitrate problem — accept with a
+recorded reason instead of inflating the file.
+
+**Compare candidates at equal bitrate.** A hardware encoder on a nominal
+"quality 22" can score higher than software purely because it spent 50% more
+bits. Normalise by size before judging efficiency, then re-rank.
+
+### B.2 The scripts worth building (once per series)
+
+- **probe-all** — one JSON per source, cached. Never re-probe mid-batch.
+- **plan builder** — folder/title → season/episode mapping, plus the structural
+  assertions: every disc's chosen episodes must sum to its play-all runtime, and
+  every season's count must match the metadata source. Emit `plan.json` and the
+  Jellyfin filenames from the same file.
+- **per-season bracket** — n samples per season × 3 quality steps, audited and
+  tabulated. Record the table in the report.
+- **runner** — encode → audit → accept → remux → place, with a resume triple
+  (source fingerprint + sidecar + passing audit), a retry ladder, a duration
+  gate before placing, and unbuffered output.
+- **status** — progress as *plan minus done*, plus a rate from the median gap
+  between recent completions (an outage cannot skew it).
+- **repair / accept passes** — re-run only audits whose metric is missing or
+  whose evidence is weak, using the same evidence standard as first acceptance.
+
+### B.3 Gotchas, and the fix for each
+
+| gotcha | fix |
+|---|---|
+| declared fps is not the decoded fps | measure frames/seconds; treat the header as a hint |
+| some titles in a series sit at a different native rate | decide rate per title, not per season |
+| bonus features are interlaced/telecined while episodes are not | classify every extra; mixed content needs the hybrid chain (plain deinterlace leaves the film half combed) |
+| a sample-derived quality setting is optimistic or pessimistic by ±0.5 VMAF | bracket several titles per season, or budget a retry ladder (~25–40 min/title) |
+| `pkill -f <pattern>` matches your own shell command line and kills the session | kill by PID |
+| `python3 script.py \| tee log` looks dead for hours | `python3 -u` |
+| ffmpeg refuses `<name>.part` (cannot infer the format) | keep the `.mkv` suffix: `<name>.part.mkv`, rename after |
+| unlinking a work file that something else already placed crashes the worker | guard every `unlink` with `exists` |
+| one dead worker is invisible; the others keep reporting success | progress = plan minus done, reconciled centrally |
+| a truncated work file can pass an audit-only acceptance path | check duration against source before placing |
+| the perceptual scorer crashes and the harness silently falls back to a blunter metric | re-run any audit whose chosen metric is absent |
+| a genuinely static shot reads as a "freeze" in the output but not the source, because denoise removed the dither | test the master across the freeze span (frame-to-frame PSNR); static master = artifact, changing = real stall |
+| container duration drifts with identical frames | compare frame count, last video PTS and per-stream packet counts before condemning it; a subtitle tail can extend duration |
+| repairing can invalidate good work | a repair pass must use the same evidence standard as first acceptance |
+
+### B.4 Status updates
+
+**This user wants a progress update every 20 minutes on any job longer than an
+hour**, in the same thread, whether or not anything interesting happened. Each
+update: current state (`RUNNING` / `DONE`), counts done vs total, what is running
+right now, and anything that needs a decision. Do not go quiet while debugging —
+a two-line "still going, here is the block" is what is wanted.
+
+Mechanically, a recurring scheduled task bound to the thread does this reliably;
+delete it once the job is finished so it cannot fire afterwards. Ad-hoc sleeps
+work but die with the session.
+
+### B.5 Permissions on a shared NAS
+
+Files written by a root container land as `root:root` with `644` on the share.
+They are readable, so Jellyfin plays them — but the user's file manager cannot
+edit or move them, which surfaces as "permissions are wrong" even though nothing
+is broken.
+
+- Fix before handoff, every time: `chown -R nobody:users <dir>` (99:100 on
+  Unraid) and `chmod -R a+rwX <dir>`. Capital `X`: directories get `777`,
+  files stay `666`, and no `.mkv` is marked executable.
+- On Unraid the GUI equivalent is **Tools → New Permissions**, which is
+  per-share and sweeps the whole share.
+- State the distinction when it comes up: read-only is fine for playback,
+  only writes need the fix.
